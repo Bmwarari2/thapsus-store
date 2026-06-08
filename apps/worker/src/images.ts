@@ -36,6 +36,17 @@ function extFromUrl(url: string): string {
   return m?.[1]?.toLowerCase() ?? "jpg";
 }
 
+/**
+ * Normalize source image URLs into a fetchable absolute URL.
+ * Many sources (e.g. SHEIN / ltwebstatic) return protocol-relative URLs
+ * like "//img.ltwebstatic.com/..." which Node's fetch() cannot parse.
+ */
+function normalizeImageUrl(url: string): string {
+  const trimmed = url.trim();
+  if (trimmed.startsWith("//")) return `https:${trimmed}`;
+  return trimmed;
+}
+
 async function alreadyUploaded(s3: S3Client, key: string): Promise<boolean> {
   try {
     await s3.send(new HeadObjectCommand({ Bucket: process.env.R2_BUCKET!, Key: key }));
@@ -60,7 +71,7 @@ export async function uploadProductImages(
   const cdnUrls: string[] = [];
 
   for (let i = 0; i < sourceUrls.length; i++) {
-    const sourceUrl = sourceUrls[i];
+    const sourceUrl = normalizeImageUrl(sourceUrls[i]);
     const ext = extFromUrl(sourceUrl);
     const key = r2Key(productId, i, ext);
 
