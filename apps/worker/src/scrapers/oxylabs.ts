@@ -67,13 +67,18 @@ export async function oxyRequest(payload: Record<string, unknown>): Promise<OxyR
 // ── Alibaba ───────────────────────────────────────────────────────────────────
 
 export async function fetchAlibabaProduct(url: string): Promise<unknown> {
-  const data = await oxyRequest({ source: "alibaba_product", url, parse: true });
+  // alibaba_product requires product_id, not url
+  // URL formats: /product-detail/Name_1600123456789.html  or  /product-detail/1600123456789.html
+  const match = url.match(/[_\/](\d{8,})(?:\.html)?/);
+  const productId = match?.[1];
+  if (!productId) throw new Error(`Cannot extract product_id from Alibaba URL: ${url}`);
+  const data = await oxyRequest({ source: "alibaba_product", product_id: productId, parse: true });
   return data.results[0]?.content ?? null;
 }
 
 export async function fetchAlibabaSearch(query: string): Promise<unknown[]> {
-  const searchUrl = `https://www.alibaba.com/trade/search?SearchText=${encodeURIComponent(query)}&IndexArea=product_en`;
-  const data = await oxyRequest({ source: "alibaba_search", url: searchUrl, parse: true });
+  // alibaba_search requires query, not url
+  const data = await oxyRequest({ source: "alibaba_search", query, parse: true });
   const content = data.results[0]?.content as { items?: unknown[] } | null;
   return content?.items ?? [];
 }
@@ -81,13 +86,18 @@ export async function fetchAlibabaSearch(query: string): Promise<unknown[]> {
 // ── AliExpress ────────────────────────────────────────────────────────────────
 
 export async function fetchAliExpressProduct(url: string): Promise<unknown> {
-  const data = await oxyRequest({ source: "aliexpress_product", url, parse: true });
+  // aliexpress_product requires product_id, not url
+  // URL format: /item/1005003716408296.html
+  const match = url.match(/\/(\d{10,})(?:\.html)?/);
+  const productId = match?.[1];
+  if (!productId) throw new Error(`Cannot extract product_id from AliExpress URL: ${url}`);
+  const data = await oxyRequest({ source: "aliexpress_product", product_id: productId, parse: true });
   return data.results[0]?.content ?? null;
 }
 
 export async function fetchAliExpressSearch(query: string): Promise<unknown[]> {
-  const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(query)}`;
-  const data = await oxyRequest({ source: "aliexpress_search", url: searchUrl, parse: true });
+  // aliexpress_search requires query, not url
+  const data = await oxyRequest({ source: "aliexpress_search", query, parse: true });
   const content = data.results[0]?.content as { products?: unknown[] } | null;
   return content?.products ?? [];
 }
