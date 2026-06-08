@@ -248,6 +248,7 @@ export async function processImportJob(job: Job<ImportJobPayload>): Promise<void
   const config = await loadPricingConfig();
   let productsFound = 0;
   let productsAdded = 0;
+  let productsUpdated = 0;
 
   try {
     const scraped = await scrapeProducts(
@@ -264,6 +265,7 @@ export async function processImportJob(job: Job<ImportJobPayload>): Promise<void
       try {
         const { isNew } = await upsertProduct(product, importJob.category_id, config);
         if (isNew) productsAdded++;
+        else productsUpdated++;
 
         // Report progress back to BullMQ
         await job.updateProgress(Math.round(((i + 1) / scraped.length) * 100));
@@ -280,7 +282,10 @@ export async function processImportJob(job: Job<ImportJobPayload>): Promise<void
       [jobId, productsFound, productsAdded],
     );
 
-    console.log(`[import:${jobId}] done — ${productsAdded}/${productsFound} imported`);
+    console.log(
+      `[import:${jobId}] done — ${productsFound} found, ` +
+        `${productsAdded} added, ${productsUpdated} updated`,
+    );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await db.query(
