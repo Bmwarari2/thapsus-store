@@ -57,9 +57,59 @@ export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProdu
     blocked: /just a moment|captcha|are you a robot|access denied|cf-chl|cloudflare/i.test(html),
   };
   console.log("[shein:diag] fingerprint", JSON.stringify(fingerprint));
-  console.log("[shein:diag] head:", html.slice(0, 500).replace(/\s+/g, " "));
-  const ld = html.match(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/i);
-  if (ld?.[1]) console.log("[shein:diag] ld+json:", ld[1].replace(/\s+/g, " ").slice(0, 600));
+
+  // Brace-match the gbRawData object and reveal its structure.
+  const extractBalanced = (s: string, fromBrace: number): string | null => {
+    let depth = 0, inStr = false, esc = false;
+    for (let i = fromBrace; i < s.length; i++) {
+      const c = s[i];
+      if (inStr) {
+        if (esc) esc = false;
+        else if (c === "\\") esc = true;
+        else if (c === '"') inStr = false;
+      } else if (c === '"') inStr = true;
+      else if (c === "{") depth++;
+      else if (c === "}") { if (--depth === 0) return s.slice(fromBrace, i + 1); }
+    }
+    return null;
+  };
+  const gi = html.indexOf("gbRawData");
+  const brace = gi !== -1 ? html.indexOf("{", gi) : -1;
+  const raw = brace !== -1 ? extractBalanced(html, brace) : null;
+  if (raw) {
+    try {
+      const obj = JSON.parse(raw) as Record<string, unknown>;
+      console.log("[shein:diag] gbRawData keys:", Object.keys(obj).join(","), "rawLen", raw.length);
+      const hits: string[] = [];
+      const scan = (o: unknown, path: string, depth: number) => {
+        if (!o || typeof o !== "object" || depth > 5) return;
+        for (const k of Object.keys(o as Record<string, unknown>)) {
+          const v = (o as Record<string, unknown>)[k];
+          if (/attr|sku|size|colou?r|stock|sale|variant|price|currency|amount/i.test(k)) {
+            hits.push(`${path}.${k}=${Array.isArray(v) ? `[${v.length}]` : typeof v}`);
+          }
+          scan(v, `${path}.${k}`, depth + 1);
+        }
+      };
+      scan(obj, "gb", 0);
+      console.log("[shein:diag] paths:", hits.slice(0, 80).join(" | "));
+    } catch (e) {
+      console.log("[shein:diag] gbRawData parse failed:", String(e).slice(0, 120), "rawLen", raw.length);
+    }
+  } else {
+    console.log("[shein:diag] gbRawData not brace-extracted (gi", gi, "brace", brace, ")");
+  }
+
+  // Dump every ld+json block's @type and the Product one in full.
+  const ldBlocks = [...html.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)];
+  console.log("[shein:diag] ld+json count:", ldBlocks.length);
+  ldBlocks.forEach((b, i) => {
+    try {
+      const j = JSON.parse(b[1]) as Record<string, unknown>;
+      console.log(`[shein:diag] ld[${i}] @type=${j["@type"]}`);
+      if (j["@type"] === "Product") console.log(`[shein:diag] ld Product:`, JSON.stringify(j).slice(0, 900));
+    } catch { console.log(`[shein:diag] ld[${i}] parse fail`); }
+  });
 
   // Shein embeds product data in several possible script patterns
   let productData: SheinProductData | null = null;
