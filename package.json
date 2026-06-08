@@ -1,0 +1,26 @@
+{
+  "name": "thapsus-store",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Thapsus Store — Kenya e-commerce platform",
+  "packageManager": "pnpm@9.0.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter ./apps/* dev",
+    "dev:api": "pnpm --filter @thapsus/api dev",
+    "dev:web": "pnpm --filter @thapsus/web dev",
+    "dev:worker": "pnpm --filter @thapsus/worker dev",
+    "build": "pnpm --filter @thapsus/shared build && pnpm --filter @thapsus/web build && pnpm --filter @thapsus/api build",
+    "start:api": "pnpm --filter @thapsus/api start",
+    "start:worker": "pnpm --filter @thapsus/worker start",
+    "typecheck": "pnpm -r typecheck",
+    "lint": "pnpm -r lint",
+    "migrate": "node scripts/migrate.mjs"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=22",
+    "pnpm": ">=9"
+  }
+}
