@@ -37,7 +37,7 @@ export async function oxyRequest(payload: Record<string, unknown>): Promise<OxyR
           "Content-Type": "application/json",
         },
         body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(60_000),
+        signal: AbortSignal.timeout(120_000),
       });
 
       if (res.status === 429) {

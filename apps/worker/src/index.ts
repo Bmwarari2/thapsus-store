@@ -49,9 +49,10 @@ const worker = new Worker<ImportJobPayload>(
   },
   {
     connection,
-    concurrency: 2,        // Process 2 import jobs at a time
+    concurrency: 2,
+    lockDuration: 600_000,  // 10 min lock — search jobs fetch N products sequentially
     limiter: {
-      max: 10,             // Max 10 jobs per 30 seconds (respects Oxylabs rate limits)
+      max: 10,
       duration: 30_000,
     },
   },
