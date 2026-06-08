@@ -4,7 +4,7 @@
  */
 
 import { db } from "../db.js";
-import { computeProductPrice, parsePricingConfig, type PriceBreakdown } from "@thapsus/shared";
+import { computeProductPrice, parsePricingConfig, type PriceBreakdown, type SourceCurrency } from "@thapsus/shared";
 
 let cachedConfig: ReturnType<typeof parsePricingConfig> | null = null;
 let cacheExpiry = 0;
@@ -23,28 +23,34 @@ export function invalidatePricingCache() {
 }
 
 export async function priceProduct(
-  sourcePriceUsdCents: number,
+  sourcePriceCents: number,
   weightGrams: number,
   markupPctOverride?: number,
+  sourceCurrency: SourceCurrency = "USD",
 ): Promise<PriceBreakdown> {
   const config = await loadPricingConfig();
   const effectiveConfig = markupPctOverride != null
     ? { ...config, markupPct: markupPctOverride }
     : config;
-  return computeProductPrice(sourcePriceUsdCents, weightGrams, effectiveConfig);
+  return computeProductPrice(sourcePriceCents, weightGrams, effectiveConfig, sourceCurrency);
 }
 
 export async function repriceAllProducts(): Promise<number> {
   const config = await loadPricingConfig();
   const { rows: products } = await db.query(
-    `SELECT id, source_price_usd_cents, markup_pct FROM products WHERE is_active = true`,
+    `SELECT id, source_price_usd_cents, source_currency, markup_pct FROM products WHERE is_active = true`,
   );
 
   let updated = 0;
   for (const p of products) {
     const effectiveConfig = { ...config, markupPct: Number(p.markup_pct) };
     // Use a default weight of 500g for repricing; real weight set during import
-    const breakdown = computeProductPrice(Number(p.source_price_usd_cents), 500, effectiveConfig);
+    const breakdown = computeProductPrice(
+      Number(p.source_price_usd_cents),
+      500,
+      effectiveConfig,
+      (p.source_currency as SourceCurrency) ?? "USD",
+    );
     await db.query(
       `UPDATE products
        SET shipping_fee_kes_cents = $2,

@@ -15,45 +15,56 @@ interface ExchangeRateResponse {
 }
 
 export async function updateExchangeRate(): Promise<void> {
-  console.log("[exchange-rate] fetching latest USD→KES rate...");
+  console.log("[exchange-rate] fetching latest USD→KES and GBP→KES rates...");
 
-  let rate: number;
+  let usdToKes: number;
+  let gbpToKes: number;
 
   try {
     const res = await fetch(EXCHANGE_API_URL, { signal: AbortSignal.timeout(10_000) });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = (await res.json()) as ExchangeRateResponse;
 
-    if (data.result !== "success" || !data.rates.KES) {
+    if (data.result !== "success" || !data.rates.KES || !data.rates.GBP) {
       throw new Error("Invalid API response");
     }
-    rate = data.rates.KES;
+    // Rates are relative to USD. GBP→KES = (USD→KES) / (USD→GBP).
+    usdToKes = data.rates.KES;
+    gbpToKes = data.rates.KES / data.rates.GBP;
   } catch (err) {
-    console.error("[exchange-rate] fetch failed, keeping existing rate:", err);
+    console.error("[exchange-rate] fetch failed, keeping existing rates:", err);
     return;
   }
 
-  const rounded = Math.round(rate * 100) / 100; // 2 decimal places
+  const round2 = (n: number) => Math.round(n * 100) / 100;
+  const usd = round2(usdToKes);
+  const gbp = round2(gbpToKes);
 
   // Update pricing_config (used by the pricing engine)
   await db.query(
     `UPDATE pricing_config SET value = $1, updated_at = now() WHERE key = 'usd_to_kes_rate'`,
-    [String(rounded)],
+    [String(usd)],
+  );
+  await db.query(
+    `UPDATE pricing_config SET value = $1, updated_at = now() WHERE key = 'gbp_to_kes_rate'`,
+    [String(gbp)],
   );
 
   // Insert into exchange_rates history
   await db.query(
-    `INSERT INTO exchange_rates (base, quote, rate, source) VALUES ('USD', 'KES', $1, 'open.er-api.com')`,
-    [rounded],
+    `INSERT INTO exchange_rates (base, quote, rate, source) VALUES
+       ('USD', 'KES', $1, 'open.er-api.com'),
+       ('GBP', 'KES', $2, 'open.er-api.com')`,
+    [usd, gbp],
   );
 
-  console.log(`[exchange-rate] updated USD→KES to ${rounded}`);
+  console.log(`[exchange-rate] updated USD→KES to ${usd}, GBP→KES to ${gbp}`);
 
   // Trigger full reprice of all active products
-  await repriceAllProducts(rounded);
+  await repriceAllProducts(usd, gbp);
 }
 
-async function repriceAllProducts(usdToKes: number): Promise<void> {
+async function repriceAllProducts(usdToKes: number, gbpToKes: number): Promise<void> {
   // Load full pricing config
   const { rows: configRows } = await db.query(`SELECT key, value FROM pricing_config`);
   const config: Record<string, number> = {};
@@ -66,14 +77,15 @@ async function repriceAllProducts(usdToKes: number): Promise<void> {
   const perKgKes = (config.per_kg_shipping_kes ?? 15000) / 100;
 
   const { rows: products } = await db.query(
-    `SELECT id, source_price_usd_cents, markup_pct FROM products WHERE is_active = true`,
+    `SELECT id, source_price_usd_cents, source_currency, markup_pct FROM products WHERE is_active = true`,
   );
 
   let updated = 0;
   for (const p of products) {
     const effectiveMarkup = Number(p.markup_pct) ?? markupPct;
-    const sourcePriceUsd = Number(p.source_price_usd_cents) / 100;
-    const sourcePriceKes = sourcePriceUsd * usdToKes;
+    const rate = p.source_currency === "GBP" ? gbpToKes : usdToKes;
+    const sourcePrice = Number(p.source_price_usd_cents) / 100;
+    const sourcePriceKes = sourcePrice * rate;
     const markedUpKes = sourcePriceKes * (1 + effectiveMarkup / 100);
     const shippingKes = baseShippingKes + (0.5 * perKgKes); // default 500g
     const cifKes = markedUpKes + shippingKes;

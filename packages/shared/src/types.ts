@@ -20,6 +20,8 @@ export type ReviewStatus = "pending" | "approved" | "rejected";
 
 export type SourcePlatform = "alibaba" | "aliexpress" | "shein" | "manual";
 
+export type SourceCurrency = "USD" | "GBP";
+
 export type StockStatus = "in_stock" | "low_stock" | "out_of_stock";
 
 // Normalized product shape returned by all scrapers
@@ -30,7 +32,8 @@ export interface ScrapedProduct {
   name: string;
   description: string;
   images: string[];            // original URLs from source (will be re-uploaded to R2)
-  sourcePriceUsdCents: number;
+  sourcePriceUsdCents: number; // price in minor units of sourceCurrency (legacy name)
+  sourceCurrency?: SourceCurrency; // defaults to USD when omitted
   weightGrams: number;
   variants: ScrapedVariant[];
   tags: string[];

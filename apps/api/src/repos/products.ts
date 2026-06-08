@@ -14,6 +14,7 @@ export interface Product {
   tags: string[];
   images: string[];
   sourcePriceUsdCents: number;
+  sourceCurrency: string;
   markupPct: number;
   shippingFeeKesCents: number;
   taxKesCents: number;
@@ -58,6 +59,7 @@ function mapProduct(row: Record<string, unknown>): Product {
     tags: (row.tags as string[]) ?? [],
     images: (row.images as string[]) ?? [],
     sourcePriceUsdCents: Number(row.source_price_usd_cents),
+    sourceCurrency: (row.source_currency as string) ?? "USD",
     markupPct: Number(row.markup_pct),
     shippingFeeKesCents: Number(row.shipping_fee_kes_cents),
     taxKesCents: Number(row.tax_kes_cents),
@@ -268,6 +270,7 @@ export async function update(
   const fieldMap: Record<string, string> = {
     name: "name", description: "description", categoryId: "category_id",
     tags: "tags", images: "images", sourcePriceUsdCents: "source_price_usd_cents",
+    sourceCurrency: "source_currency",
     markupPct: "markup_pct", shippingFeeKesCents: "shipping_fee_kes_cents",
     taxKesCents: "tax_kes_cents", sellPriceKesCents: "sell_price_kes_cents",
     stockStatus: "stock_status", isActive: "is_active", isFeatured: "is_featured",

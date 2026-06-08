@@ -1,13 +1,21 @@
 // Core pricing engine.
-// All monetary amounts are in minor units (cents for KES, cents for USD).
+// All monetary amounts are in minor units (cents for KES, cents for source currency).
+
+import type { SourceCurrency } from "./types.js";
 
 export interface PricingConfig {
   usdToKesRate: number;      // e.g. 130
+  gbpToKesRate: number;      // e.g. 165
   markupPct: number;         // e.g. 5  (= 5%)
   importDutyPct: number;     // e.g. 25 (= 25%)
   vatPct: number;            // e.g. 16 (= 16%)
   baseShippingKes: number;   // KES (not cents), e.g. 500
   perKgShippingKes: number;  // KES per kg, e.g. 150
+}
+
+/** KES conversion rate for a given source currency. */
+export function rateForCurrency(config: PricingConfig, currency: SourceCurrency = "USD"): number {
+  return currency === "GBP" ? config.gbpToKesRate : config.usdToKesRate;
 }
 
 export interface PriceBreakdown {
@@ -22,12 +30,13 @@ export interface PriceBreakdown {
 }
 
 export function computeProductPrice(
-  sourcePriceUsdCents: number,
+  sourcePriceCents: number,
   weightGrams: number,
-  config: PricingConfig
+  config: PricingConfig,
+  sourceCurrency: SourceCurrency = "USD"
 ): PriceBreakdown {
-  const sourcePriceUsd = sourcePriceUsdCents / 100;
-  const sourcePriceKes = sourcePriceUsd * config.usdToKesRate;
+  const sourcePrice = sourcePriceCents / 100;
+  const sourcePriceKes = sourcePrice * rateForCurrency(config, sourceCurrency);
   const markedUpKes = sourcePriceKes * (1 + config.markupPct / 100);
 
   const weightKg = weightGrams / 1000;
@@ -56,6 +65,7 @@ export function parsePricingConfig(rows: { key: string; value: string }[]): Pric
   const m = Object.fromEntries(rows.map((r) => [r.key, r.value]));
   return {
     usdToKesRate: Number(m.usd_to_kes_rate ?? 130),
+    gbpToKesRate: Number(m.gbp_to_kes_rate ?? 165),
     markupPct: Number(m.default_markup_pct ?? 5),
     importDutyPct: Number(m.import_duty_pct ?? 25),
     vatPct: Number(m.vat_pct ?? 16),

@@ -120,7 +120,12 @@ async function upsertProduct(
   );
 
   const pricingConfig = { ...config, markupPct: config.markupPct };
-  const breakdown = computeProductPrice(scraped.sourcePriceUsdCents, scraped.weightGrams, pricingConfig);
+  const breakdown = computeProductPrice(
+    scraped.sourcePriceUsdCents,
+    scraped.weightGrams,
+    pricingConfig,
+    scraped.sourceCurrency,
+  );
 
   // Resolve or create brand
   let brandId: string | null = null;
@@ -149,6 +154,7 @@ async function upsertProduct(
            sell_price_kes_cents   = $5,
            images                 = $6,
            source_url             = $7,
+           source_currency        = $8,
            last_scraped_at        = now(),
            updated_at             = now()
        WHERE id = $1`,
@@ -160,6 +166,7 @@ async function upsertProduct(
         breakdown.totalKesCents,
         cdnImages,
         scraped.sourceUrl,
+        scraped.sourceCurrency ?? "USD",
       ],
     );
 
@@ -175,11 +182,11 @@ async function upsertProduct(
     `INSERT INTO products (
        name, slug, description, category_id, brand_id, tags, images,
        source_platform, source_url, source_id,
-       source_price_usd_cents, markup_pct,
+       source_price_usd_cents, source_currency, markup_pct,
        shipping_fee_kes_cents, tax_kes_cents, sell_price_kes_cents,
        estimated_days_min, estimated_days_max,
        last_scraped_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,now())
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now())
      RETURNING id`,
     [
       scraped.name,
@@ -193,6 +200,7 @@ async function upsertProduct(
       scraped.sourceUrl,
       scraped.sourceId,
       scraped.sourcePriceUsdCents,
+      scraped.sourceCurrency ?? "USD",
       config.markupPct,
       Math.round(breakdown.shippingKes * 100),
       Math.round(breakdown.vatKes * 100),
@@ -208,7 +216,7 @@ async function upsertProduct(
   for (let i = 0; i < scraped.variants.length; i++) {
     const v = scraped.variants[i];
     const variantPrice = v.priceUsdCents != null
-      ? computeProductPrice(v.priceUsdCents, scraped.weightGrams, pricingConfig).totalKesCents
+      ? computeProductPrice(v.priceUsdCents, scraped.weightGrams, pricingConfig, scraped.sourceCurrency).totalKesCents
       : breakdown.totalKesCents;
 
     await db.query(

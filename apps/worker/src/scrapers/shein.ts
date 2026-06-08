@@ -41,6 +41,16 @@ function extractJsonFromScript(html: string, pattern: RegExp): unknown | null {
 export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProduct | null {
   const $ = cheerio.load(html);
 
+  // TEMP DIAGNOSTIC: reveal where SHEIN stores size/colour/stock so we can map
+  // variants correctly. Logs the first occurrence + a snippet for each marker.
+  for (const marker of [
+    "skuList", "sale_attr", "saleAttr", "multiLevelSaleAttribute",
+    "skc_sale_attr", "attr_value_name", "stock", "mall_code",
+  ]) {
+    const idx = html.indexOf(`"${marker}"`);
+    console.log(`[shein:diag] marker "${marker}" -> ${idx === -1 ? "NOT FOUND" : `@${idx}: ${html.slice(idx, idx + 220).replace(/\s+/g, " ")}`}`);
+  }
+
   // Shein embeds product data in several possible script patterns
   let productData: SheinProductData | null = null;
 
@@ -97,6 +107,7 @@ export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProdu
 
     if (!name) return null;
 
+    console.warn("[shein] parsed via META-TAG FALLBACK — no variants/price detail available");
     return {
       sourcePlatform: "shein",
       sourceUrl,
@@ -107,6 +118,7 @@ export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProdu
       description: $('meta[name="description"]').attr("content") ?? "",
       images,
       sourcePriceUsdCents: usdCents(priceMatch?.[0]),
+      sourceCurrency: "GBP",
       weightGrams: 300, // Shein items are typically light clothing
       variants: [],
       tags: [],
@@ -116,6 +128,8 @@ export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProdu
   const pd = productData as SheinProductData;
   const d = pd.detail;
   if (!d?.goods_name) return null;
+
+  console.log(`[shein] parsed via JSON path — skuList length: ${pd.skuList?.length ?? 0}`);
 
   const images: string[] = (pd.images ?? [])
     .map((img: { origin_image?: string; src?: string }) => img.origin_image ?? img.src ?? "")
@@ -155,6 +169,7 @@ export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProdu
     description: d.description ?? "",
     images,
     sourcePriceUsdCents: usdCents(price),
+    sourceCurrency: "GBP",
     weightGrams: 300,
     variants,
     tags,
@@ -192,6 +207,7 @@ export function parseSheinSearchHtml(html: string): Partial<ScrapedProduct>[] {
           name: item.goods_name,
           images: item.goods_img ? [item.goods_img] : [],
           sourcePriceUsdCents: usdCents(item.salePrice?.amount),
+          sourceCurrency: "GBP",
           weightGrams: 300,
           variants: [],
           tags: [],
