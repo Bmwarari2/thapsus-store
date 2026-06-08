@@ -1,5 +1,7 @@
-import { Routes, Route, Link, useLocation } from 'react-router-dom';
-import { User, Package, Heart, MapPin, Bell } from 'lucide-react';
+import { Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom';
+import { User, Package, Heart, MapPin, Bell, LogOut } from 'lucide-react';
+import { useAuthStore } from '../../stores/authStore';
+import { useCartStore } from '../../stores/cartStore';
 
 const tabs = [
   { id: 'profile', icon: User, label: 'Profile', path: '/account' },
@@ -18,6 +20,15 @@ const NotificationsTab = () => <div className="p-6 bg-white rounded-2xl border b
 
 export const AccountHub = () => {
   const location = useLocation();
+  const navigate = useNavigate();
+  const logout = useAuthStore(state => state.logout);
+  const setItemCount = useCartStore(state => state.setItemCount);
+
+  const handleSignOut = () => {
+    logout();
+    setItemCount(0);
+    navigate('/');
+  };
 
   return (
     <div className="container mx-auto px-4 py-8">
@@ -44,6 +55,13 @@ export const AccountHub = () => {
                 </Link>
               );
             })}
+            <button
+              onClick={handleSignOut}
+              className="flex items-center gap-3 px-4 py-3 rounded-xl whitespace-nowrap transition-colors text-red-500 hover:bg-red-50 font-medium mt-2 md:mt-4 w-full text-left"
+            >
+              <LogOut size={18} />
+              Sign Out
+            </button>
           </nav>
         </aside>
 
