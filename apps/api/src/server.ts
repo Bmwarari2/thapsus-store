@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
+import rateLimit from "express-rate-limit";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,6 +27,33 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const app = express();
 
 app.use(helmet({ contentSecurityPolicy: false }));
+app.set("trust proxy", 1); // Required when behind Railway / Cloudflare proxy
+
+const generalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: { code: "rate_limited", message: "Too many requests, please try again later." } },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20, // strict — prevents brute force on login/signup
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: { code: "rate_limited", message: "Too many attempts, please try again in 15 minutes." } },
+});
+
+const paymentLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 5, // 5 STK pushes per minute per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: { code: "rate_limited", message: "Too many payment requests, please slow down." } },
+});
+
+app.use("/api/v1", generalLimiter);
 app.use(cors({
   origin: process.env.WEB_BASE_URL ?? true,
   credentials: true,
@@ -40,15 +68,16 @@ app.use(idempotency);
 
 const v1 = express.Router();
 
-v1.use("/auth",       authRoutes);
-v1.use("/products",   productRoutes);
-v1.use("/search",     searchRoutes);
-v1.use("/cart",       cartRoutes);
-v1.use("/orders",     orderRoutes);
-v1.use("/reviews",    reviewRoutes);
-v1.use("/me",         customerRoutes);
-v1.use("/admin",      adminRoutes);
-v1.use("/payments",   paymentRoutes);
+v1.use("/auth",                      authLimiter, authRoutes);
+v1.use("/payments/mpesa/initiate",   paymentLimiter);
+v1.use("/products",                  productRoutes);
+v1.use("/search",                    searchRoutes);
+v1.use("/cart",                      cartRoutes);
+v1.use("/orders",                    orderRoutes);
+v1.use("/reviews",                   reviewRoutes);
+v1.use("/me",                        customerRoutes);
+v1.use("/admin",                     adminRoutes);
+v1.use("/payments",                  paymentRoutes);
 
 v1.get("/categories", async (_req, res) => {
   const { getCategories } = await import("./repos/products.js");
