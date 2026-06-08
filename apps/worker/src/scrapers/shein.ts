@@ -41,15 +41,25 @@ function extractJsonFromScript(html: string, pattern: RegExp): unknown | null {
 export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProduct | null {
   const $ = cheerio.load(html);
 
-  // TEMP DIAGNOSTIC: reveal where SHEIN stores size/colour/stock so we can map
-  // variants correctly. Logs the first occurrence + a snippet for each marker.
-  for (const marker of [
-    "skuList", "sale_attr", "saleAttr", "multiLevelSaleAttribute",
-    "skc_sale_attr", "attr_value_name", "stock", "mall_code",
-  ]) {
-    const idx = html.indexOf(`"${marker}"`);
-    console.log(`[shein:diag] marker "${marker}" -> ${idx === -1 ? "NOT FOUND" : `@${idx}: ${html.slice(idx, idx + 220).replace(/\s+/g, " ")}`}`);
-  }
+  // TEMP DIAGNOSTIC: fingerprint the page we actually received so we can tell a
+  // block/challenge page from a real product page and find where data lives.
+  const fingerprint = {
+    len: html.length,
+    title: $("title").first().text().trim().slice(0, 100),
+    ogTitle: ($('meta[property="og:title"]').attr("content") ?? "").slice(0, 80),
+    ogImage: !!$('meta[property="og:image"]').attr("content"),
+    ldJson: html.includes("application/ld+json"),
+    goodsName: html.includes("goods_name"),
+    productIntro: html.includes("productIntroData"),
+    nuxt: html.includes("__NUXT__"),
+    initialState: html.includes("__INITIAL_STATE__"),
+    gbRaw: html.includes("gbRawData"),
+    blocked: /just a moment|captcha|are you a robot|access denied|cf-chl|cloudflare/i.test(html),
+  };
+  console.log("[shein:diag] fingerprint", JSON.stringify(fingerprint));
+  console.log("[shein:diag] head:", html.slice(0, 500).replace(/\s+/g, " "));
+  const ld = html.match(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/i);
+  if (ld?.[1]) console.log("[shein:diag] ld+json:", ld[1].replace(/\s+/g, " ").slice(0, 600));
 
   // Shein embeds product data in several possible script patterns
   let productData: SheinProductData | null = null;
