@@ -58,58 +58,33 @@ export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProdu
   };
   console.log("[shein:diag] fingerprint", JSON.stringify(fingerprint));
 
-  // Brace-match the gbRawData object and reveal its structure.
-  const extractBalanced = (s: string, fromBrace: number): string | null => {
-    let depth = 0, inStr = false, esc = false;
-    for (let i = fromBrace; i < s.length; i++) {
-      const c = s[i];
-      if (inStr) {
-        if (esc) esc = false;
-        else if (c === "\\") esc = true;
-        else if (c === '"') inStr = false;
-      } else if (c === '"') inStr = true;
-      else if (c === "{") depth++;
-      else if (c === "}") { if (--depth === 0) return s.slice(fromBrace, i + 1); }
-    }
-    return null;
+  // Show the real container by dumping context around the first "goods_name",
+  // and map every occurrence of gbRawData / productIntro-like assignments.
+  const gn = html.indexOf("goods_name");
+  if (gn !== -1) {
+    console.log("[shein:diag] goods_name ctx:", html.slice(gn - 120, gn + 1400).replace(/\s+/g, " "));
+  }
+  const occ = (needle: string) => {
+    const idxs: number[] = [];
+    let i = html.indexOf(needle);
+    while (i !== -1 && idxs.length < 5) { idxs.push(i); i = html.indexOf(needle, i + 1); }
+    return idxs;
   };
-  const gi = html.indexOf("gbRawData");
-  const brace = gi !== -1 ? html.indexOf("{", gi) : -1;
-  const raw = brace !== -1 ? extractBalanced(html, brace) : null;
-  if (raw) {
-    try {
-      const obj = JSON.parse(raw) as Record<string, unknown>;
-      console.log("[shein:diag] gbRawData keys:", Object.keys(obj).join(","), "rawLen", raw.length);
-      const hits: string[] = [];
-      const scan = (o: unknown, path: string, depth: number) => {
-        if (!o || typeof o !== "object" || depth > 5) return;
-        for (const k of Object.keys(o as Record<string, unknown>)) {
-          const v = (o as Record<string, unknown>)[k];
-          if (/attr|sku|size|colou?r|stock|sale|variant|price|currency|amount/i.test(k)) {
-            hits.push(`${path}.${k}=${Array.isArray(v) ? `[${v.length}]` : typeof v}`);
-          }
-          scan(v, `${path}.${k}`, depth + 1);
-        }
-      };
-      scan(obj, "gb", 0);
-      console.log("[shein:diag] paths:", hits.slice(0, 80).join(" | "));
-    } catch (e) {
-      console.log("[shein:diag] gbRawData parse failed:", String(e).slice(0, 120), "rawLen", raw.length);
-    }
-  } else {
-    console.log("[shein:diag] gbRawData not brace-extracted (gi", gi, "brace", brace, ")");
+  for (const needle of ["gbRawData", "productIntro", "saleAttr", "skc_", "mall_code", "priceCurrency"]) {
+    const idxs = occ(needle);
+    console.log(`[shein:diag] occ "${needle}": ${idxs.length} ->`,
+      idxs.map((i) => html.slice(i, i + 50).replace(/\s+/g, " ")).join(" || "));
   }
 
-  // Dump every ld+json block's @type and the Product one in full.
-  const ldBlocks = [...html.matchAll(/<script[^>]*application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi)];
-  console.log("[shein:diag] ld+json count:", ldBlocks.length);
-  ldBlocks.forEach((b, i) => {
-    try {
-      const j = JSON.parse(b[1]) as Record<string, unknown>;
-      console.log(`[shein:diag] ld[${i}] @type=${j["@type"]}`);
-      if (j["@type"] === "Product") console.log(`[shein:diag] ld Product:`, JSON.stringify(j).slice(0, 900));
-    } catch { console.log(`[shein:diag] ld[${i}] parse fail`); }
-  });
+  // DOM scan: are sizes/colours rendered as elements rather than JSON?
+  const sample = (sel: string) =>
+    $(sel).slice(0, 8).map((_, el) => $(el).attr("aria-label") || $(el).attr("title") || $(el).text().trim().slice(0, 24)).get().filter(Boolean);
+  for (const sel of [
+    '[class*="size"]', '[class*="Size"]', '[class*="color"]', '[class*="Color"]',
+    '[aria-label*="size" i]', '[class*="attr"]', '[class*="sold-out"]', '[class*="soldout"]',
+  ]) {
+    console.log(`[shein:diag] dom ${sel}: count=${$(sel).length} sample=${JSON.stringify(sample(sel))}`);
+  }
 
   // Shein embeds product data in several possible script patterns
   let productData: SheinProductData | null = null;
