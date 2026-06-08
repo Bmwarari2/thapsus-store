@@ -1,14 +1,17 @@
-import { Routes, Route, Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, ShoppingBag, Users, Settings, Package, MessageSquare } from 'lucide-react';
+import { Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
+import { LayoutDashboard, ShoppingBag, Users, Settings, Package, MessageSquare, Download } from 'lucide-react';
+import { useAuthStore } from '../../stores/authStore';
+import { ImportsPage } from './ImportsPage';
 
 const AdminSidebar = () => {
   const location = useLocation();
   const menu = [
-    { label: 'Dashboard', path: '/admin', icon: LayoutDashboard },
-    { label: 'Products', path: '/admin/products', icon: Package },
-    { label: 'Orders', path: '/admin/orders', icon: ShoppingBag },
-    { label: 'Reviews', path: '/admin/reviews', icon: MessageSquare },
-    { label: 'Customers', path: '/admin/customers', icon: Users },
+    { label: 'Dashboard',    path: '/admin',           icon: LayoutDashboard },
+    { label: 'Products',     path: '/admin/products',  icon: Package },
+    { label: 'Orders',       path: '/admin/orders',    icon: ShoppingBag },
+    { label: 'Reviews',      path: '/admin/reviews',   icon: MessageSquare },
+    { label: 'Customers',    path: '/admin/customers', icon: Users },
+    { label: 'Imports',      path: '/admin/imports',   icon: Download },
     { label: 'Pricing Config', path: '/admin/pricing', icon: Settings },
   ];
 
@@ -70,6 +73,11 @@ const Products = () => <div className="p-8"><h1 className="text-2xl font-bold">P
 const Orders = () => <div className="p-8"><h1 className="text-2xl font-bold">Orders Management</h1><p className="mt-4 text-textSecondary">Data table coming soon.</p></div>;
 
 export const AdminLayout = () => {
+  const user = useAuthStore(state => state.user);
+
+  if (!user) return <Navigate to="/auth/login" replace />;
+  if (user.role !== 'admin') return <Navigate to="/" replace />;
+
   return (
     <div className="flex min-h-screen bg-surface">
       <AdminSidebar />
@@ -78,6 +86,7 @@ export const AdminLayout = () => {
           <Route index element={<Dashboard />} />
           <Route path="products" element={<Products />} />
           <Route path="orders" element={<Orders />} />
+          <Route path="imports" element={<ImportsPage />} />
           <Route path="*" element={<div className="p-8">Coming Soon</div>} />
         </Routes>
       </main>

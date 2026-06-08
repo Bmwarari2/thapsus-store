@@ -125,3 +125,31 @@ export const apiUpdateCartItem = (id: string, qty: number) =>
 
 export const apiRemoveCartItem = (id: string) =>
   api.delete(`/cart/items/${id}`).then(unwrap<{ removed: boolean }>);
+
+// ── Admin: Import Jobs ────────────────────────────────────────────────────────
+
+export interface ImportJob {
+  id: string;
+  source_platform: 'aliexpress' | 'alibaba' | 'shein';
+  source_url: string | null;
+  search_query: string | null;
+  category_id: string | null;
+  category_name: string | null;
+  status: 'queued' | 'running' | 'done' | 'failed';
+  products_found: number | null;
+  products_added: number | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export const apiGetImportJobs = () =>
+  api.get('/admin/import-jobs').then(unwrap<ImportJob[]>);
+
+export const apiCreateImportJob = (body: {
+  sourcePlatform: 'aliexpress' | 'alibaba' | 'shein';
+  searchQuery?: string;
+  sourceUrl?: string;
+  categoryId?: string;
+}) => api.post('/admin/import-jobs', body).then(unwrap<ImportJob>);
