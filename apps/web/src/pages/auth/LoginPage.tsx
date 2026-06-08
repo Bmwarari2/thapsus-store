@@ -8,6 +8,7 @@ import { Input } from '../../components/ui/Input';
 import { Mail, Lock, EyeOff, Eye } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useAuthStore } from '../../stores/authStore';
+import { apiLogin } from '../../lib/api';
 
 const loginSchema = z.object({
   email: z.string().email('Please enter a valid email'),
@@ -26,20 +27,16 @@ export const LoginPage = () => {
   });
 
   const onSubmit = async (data: LoginForm) => {
-    // Simulate API Call
-    return new Promise<void>((resolve) => {
-      setTimeout(() => {
-        login('fake-jwt-token', {
-          id: 'user-1',
-          name: 'Jane Doe',
-          email: data.email,
-          role: 'customer'
-        });
-        toast.success('Welcome back!');
-        navigate('/');
-        resolve();
-      }, 1000);
-    });
+    try {
+      const { user, token } = await apiLogin(data.email, data.password);
+      login(token, { id: user.id, name: user.fullName ?? user.email, email: user.email, role: user.role });
+      toast.success('Welcome back!');
+      navigate('/');
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: { message?: string } } } })
+        ?.response?.data?.error?.message ?? 'Login failed. Please try again.';
+      toast.error(msg);
+    }
   };
 
   return (

@@ -1,55 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
+import { useQuery } from '@tanstack/react-query';
 import { ProductGrid } from '../../components/product/ProductGrid';
 import { ProductCard } from '../../components/product/ProductCard';
 import { Button } from '../../components/ui/Button';
-
-// Mock data for initial build
-const MOCK_PRODUCTS = [
-  {
-    id: '1',
-    name: 'Summer Floral Midi Dress',
-    slug: 'summer-floral-midi-dress',
-    sellPriceKesCents: 320000,
-    images: ['https://images.unsplash.com/photo-1515372039744-b8f02a3ae446?auto=format&fit=crop&w=400&q=80'],
-    ratingAvg: 4.5,
-    ratingCount: 128,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: '2',
-    name: 'Classic White Sneakers',
-    slug: 'classic-white-sneakers',
-    sellPriceKesCents: 450000,
-    sourcePriceUsdCents: 5000,
-    images: ['https://images.unsplash.com/photo-1549298916-b41d501d3772?auto=format&fit=crop&w=400&q=80'],
-    ratingAvg: 4.8,
-    ratingCount: 84,
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: '3',
-    name: 'Elegant Evening Gown',
-    slug: 'elegant-evening-gown',
-    sellPriceKesCents: 850000,
-    images: ['https://images.unsplash.com/photo-1566150905458-1bf1fc113f0d?auto=format&fit=crop&w=400&q=80'],
-    ratingAvg: 4.2,
-    ratingCount: 45,
-    createdAt: new Date(Date.now() - 1000000000).toISOString(),
-  },
-  {
-    id: '4',
-    name: 'Casual Denim Jacket',
-    slug: 'casual-denim-jacket',
-    sellPriceKesCents: 520000,
-    sourcePriceUsdCents: 4000,
-    images: ['https://images.unsplash.com/photo-1551537482-f20927b34720?auto=format&fit=crop&w=400&q=80'],
-    ratingAvg: 4.6,
-    ratingCount: 210,
-    createdAt: new Date().toISOString(),
-  }
-];
+import { SkeletonCard } from '../../components/shared/SkeletonCard';
+import { apiGetFeaturedProducts, apiGetCategories } from '../../lib/api';
 
 const BANNERS = [
   {
@@ -57,36 +14,36 @@ const BANNERS = [
     title: "New Arrivals Weekly",
     subtitle: "Discover the latest trends from globally sourced brands.",
     image: "https://images.unsplash.com/photo-1483985988355-763728e1935b?auto=format&fit=crop&w=1200&q=80",
-    color: "bg-pink-100 text-pink-900"
   },
   {
     id: 2,
     title: "Free delivery on orders over KES 5,000",
     subtitle: "Shop more, save more on shipping.",
     image: "https://images.unsplash.com/photo-1445205170230-053b83016050?auto=format&fit=crop&w=1200&q=80",
-    color: "bg-blue-100 text-blue-900"
   },
   {
     id: 3,
     title: "Pay with M-Pesa",
     subtitle: "Fast, secure, and convenient checkout.",
     image: "https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=1200&q=80",
-    color: "bg-green-100 text-green-900"
   }
-];
-
-const CATEGORIES = [
-  { name: 'Women', icon: '👗' },
-  { name: 'Shoes', icon: '👟' },
-  { name: 'Beauty', icon: '💄' },
-  { name: 'Home', icon: '🏠' },
-  { name: 'Men', icon: '👔' },
-  { name: 'Kids', icon: '🧸' },
-  { name: 'Tech', icon: '📱' },
 ];
 
 export const HomePage = () => {
   const [currentBanner, setCurrentBanner] = useState(0);
+
+  const { data: featured = [], isLoading: loadingFeatured } = useQuery({
+    queryKey: ['featured-products'],
+    queryFn: apiGetFeaturedProducts,
+  });
+
+  const { data: categories = [] } = useQuery({
+    queryKey: ['categories'],
+    queryFn: apiGetCategories,
+  });
+
+  // Only show top-level categories in the nav strip
+  const topCategories = categories.filter((c) => c.parentId === null);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -97,7 +54,7 @@ export const HomePage = () => {
 
   return (
     <div className="space-y-12 pb-12">
-      {/* Hero Banner Carousel (Framer Motion) */}
+      {/* Hero Banner Carousel */}
       <div className="relative h-[400px] md:h-[500px] w-full overflow-hidden bg-gray-100">
         <AnimatePresence initial={false}>
           <motion.div
@@ -109,14 +66,14 @@ export const HomePage = () => {
             className="absolute inset-0"
           >
             <div className="absolute inset-0 bg-black/30 z-10" />
-            <img 
-              src={BANNERS[currentBanner].image} 
+            <img
+              src={BANNERS[currentBanner].image}
               alt={BANNERS[currentBanner].title}
               className="w-full h-full object-cover object-center"
             />
             <div className="absolute inset-0 z-20 flex items-center justify-center text-center px-4">
               <div className="max-w-2xl space-y-4">
-                <motion.h1 
+                <motion.h1
                   initial={{ y: 20, opacity: 0 }}
                   animate={{ y: 0, opacity: 1 }}
                   transition={{ delay: 0.3 }}
@@ -124,7 +81,7 @@ export const HomePage = () => {
                 >
                   {BANNERS[currentBanner].title}
                 </motion.h1>
-                <motion.p 
+                <motion.p
                   initial={{ y: 20, opacity: 0 }}
                   animate={{ y: 0, opacity: 1 }}
                   transition={{ delay: 0.4 }}
@@ -138,14 +95,15 @@ export const HomePage = () => {
                   transition={{ delay: 0.5 }}
                   className="pt-4"
                 >
-                  <Button size="lg" className="rounded-full px-8">Shop Now</Button>
+                  <Link to="/products">
+                    <Button size="lg" className="rounded-full px-8">Shop Now</Button>
+                  </Link>
                 </motion.div>
               </div>
             </div>
           </motion.div>
         </AnimatePresence>
 
-        {/* Carousel indicators */}
         <div className="absolute bottom-6 left-0 right-0 z-30 flex justify-center gap-2">
           {BANNERS.map((_, idx) => (
             <button
@@ -160,43 +118,58 @@ export const HomePage = () => {
       </div>
 
       <div className="container mx-auto px-4 space-y-16">
-        
-        {/* Category Quick-Nav */}
-        <section>
-          <div className="flex overflow-x-auto hide-scrollbar gap-4 pb-4 -mx-4 px-4 sm:mx-0 sm:px-0">
-            {CATEGORIES.map((cat, i) => (
-              <Link
-                key={i}
-                to={`/products?category=${cat.name.toLowerCase()}`}
-                className="flex flex-col items-center gap-2 min-w-[80px] shrink-0 group"
-              >
-                <div className="w-16 h-16 rounded-full bg-surface flex items-center justify-center text-2xl group-hover:bg-primary/10 group-hover:text-primary transition-colors">
-                  {cat.icon}
-                </div>
-                <span className="text-xs font-semibold text-textSecondary group-hover:text-textPrimary">{cat.name}</span>
-              </Link>
-            ))}
-          </div>
-        </section>
 
-        {/* Flash Deals */}
+        {/* Category Quick-Nav */}
+        {topCategories.length > 0 && (
+          <section>
+            <div className="flex overflow-x-auto hide-scrollbar gap-4 pb-4 -mx-4 px-4 sm:mx-0 sm:px-0">
+              {topCategories.map((cat) => (
+                <Link
+                  key={cat.id}
+                  to={`/products?category=${cat.slug}`}
+                  className="flex flex-col items-center gap-2 min-w-[80px] shrink-0 group"
+                >
+                  <div className="w-16 h-16 rounded-full bg-surface flex items-center justify-center text-2xl group-hover:bg-primary/10 group-hover:text-primary transition-colors">
+                    {cat.icon ?? '🛍️'}
+                  </div>
+                  <span className="text-xs font-semibold text-textSecondary group-hover:text-textPrimary text-center">{cat.name}</span>
+                </Link>
+              ))}
+            </div>
+          </section>
+        )}
+
+        {/* Featured Products */}
         <section>
           <div className="flex items-center justify-between mb-6">
             <div className="flex items-center gap-4">
-              <h2 className="text-2xl font-bold tracking-tight">Flash Deals</h2>
+              <h2 className="text-2xl font-bold tracking-tight">Featured</h2>
               <div className="hidden sm:flex items-center gap-1 bg-red-100 text-red-600 px-3 py-1 rounded-full text-xs font-bold">
-                <span className="animate-pulse">🔥</span> Ends in 04:23:15
+                <span className="animate-pulse">🔥</span> Hot picks
               </div>
             </div>
-            <Link to="/products?sale=true" className="text-sm font-semibold text-primary hover:underline">View All</Link>
+            <Link to="/products?featured=true" className="text-sm font-semibold text-primary hover:underline">View All</Link>
           </div>
-          <div className="flex overflow-x-auto gap-4 pb-4 -mx-4 px-4 sm:mx-0 sm:px-0 hide-scrollbar snap-x">
-            {MOCK_PRODUCTS.map((p) => (
-              <div key={p.id} className="min-w-[200px] md:min-w-[240px] shrink-0 snap-start">
-                <ProductCard product={p} />
-              </div>
-            ))}
-          </div>
+
+          {loadingFeatured ? (
+            <div className="flex overflow-x-auto gap-4 pb-4 -mx-4 px-4 sm:mx-0 sm:px-0 hide-scrollbar">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <div key={i} className="min-w-[200px] md:min-w-[240px] shrink-0">
+                  <SkeletonCard />
+                </div>
+              ))}
+            </div>
+          ) : featured.length > 0 ? (
+            <div className="flex overflow-x-auto gap-4 pb-4 -mx-4 px-4 sm:mx-0 sm:px-0 hide-scrollbar snap-x">
+              {featured.map((p) => (
+                <div key={p.id} className="min-w-[200px] md:min-w-[240px] shrink-0 snap-start">
+                  <ProductCard product={p} />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-textSecondary text-sm">No featured products yet. Check back soon!</p>
+          )}
         </section>
 
         {/* New Arrivals Grid */}
@@ -205,7 +178,13 @@ export const HomePage = () => {
             <h2 className="text-2xl font-bold tracking-tight">New Arrivals</h2>
             <Link to="/products?sort=newest" className="text-sm font-semibold text-primary hover:underline">View All</Link>
           </div>
-          <ProductGrid products={MOCK_PRODUCTS} />
+          {loadingFeatured ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+              {Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)}
+            </div>
+          ) : (
+            <ProductGrid products={featured} />
+          )}
         </section>
 
         {/* App Download Banner */}

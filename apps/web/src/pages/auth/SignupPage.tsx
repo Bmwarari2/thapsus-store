@@ -8,6 +8,7 @@ import { Input } from '../../components/ui/Input';
 import { Mail, Lock, User, EyeOff, Eye } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useAuthStore } from '../../stores/authStore';
+import { apiSignup } from '../../lib/api';
 
 const signupSchema = z.object({
   name: z.string().min(2, 'Name is required').max(80),
@@ -27,20 +28,16 @@ export const SignupPage = () => {
   });
 
   const onSubmit = async (data: SignupForm) => {
-    // Simulate API Call
-    return new Promise<void>((resolve) => {
-      setTimeout(() => {
-        login('fake-jwt-token', {
-          id: 'user-2',
-          name: data.name,
-          email: data.email,
-          role: 'customer'
-        });
-        toast.success('Account created successfully!');
-        navigate('/');
-        resolve();
-      }, 1000);
-    });
+    try {
+      const { user, token } = await apiSignup(data.name, data.email, data.password);
+      login(token, { id: user.id, name: user.fullName ?? user.email, email: user.email, role: user.role });
+      toast.success('Account created! Welcome to Thapsus.');
+      navigate('/');
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: { message?: string } } } })
+        ?.response?.data?.error?.message ?? 'Sign up failed. Please try again.';
+      toast.error(msg);
+    }
   };
 
   return (
