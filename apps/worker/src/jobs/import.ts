@@ -30,6 +30,42 @@ async function loadPricingConfig() {
   return parsePricingConfig(rows);
 }
 
+/** Replace a product's variants with the freshly scraped set (incl. per-variant stock). */
+async function syncVariants(
+  productId: string,
+  scraped: ScrapedProduct,
+  breakdown: ReturnType<typeof computeProductPrice>,
+  pricingConfig: ReturnType<typeof parsePricingConfig>,
+): Promise<void> {
+  await db.query(`DELETE FROM product_variants WHERE product_id = $1`, [productId]);
+
+  for (let i = 0; i < scraped.variants.length; i++) {
+    const v = scraped.variants[i];
+    const variantPrice = v.priceUsdCents != null
+      ? computeProductPrice(v.priceUsdCents, scraped.weightGrams, pricingConfig, scraped.sourceCurrency).totalKesCents
+      : breakdown.totalKesCents;
+
+    await db.query(
+      `INSERT INTO product_variants
+         (product_id, attributes, price_delta_kes_cents, stock_qty, image_url, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [
+        productId,
+        JSON.stringify(v.attributes),
+        variantPrice - breakdown.totalKesCents,
+        v.stockQty ?? 0,
+        v.imageUrl ?? null,
+        i,
+      ],
+    );
+  }
+
+  await db.query(
+    `UPDATE products SET has_variants = $2 WHERE id = $1`,
+    [productId, scraped.variants.length > 0],
+  );
+}
+
 async function scrapeProducts(
   platform: string,
   sourceUrl: string | null,
@@ -155,6 +191,7 @@ async function upsertProduct(
            images                 = $6,
            source_url             = $7,
            source_currency        = $8,
+           stock_status           = $9,
            last_scraped_at        = now(),
            updated_at             = now()
        WHERE id = $1`,
@@ -167,9 +204,11 @@ async function upsertProduct(
         cdnImages,
         scraped.sourceUrl,
         scraped.sourceCurrency ?? "USD",
+        scraped.stockStatus ?? "in_stock",
       ],
     );
 
+    await syncVariants(productId, scraped, breakdown, pricingConfig);
     return { id: productId, isNew: false };
   }
 
@@ -184,9 +223,9 @@ async function upsertProduct(
        source_platform, source_url, source_id,
        source_price_usd_cents, source_currency, markup_pct,
        shipping_fee_kes_cents, tax_kes_cents, sell_price_kes_cents,
-       estimated_days_min, estimated_days_max,
+       estimated_days_min, estimated_days_max, stock_status,
        last_scraped_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now())
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,now())
      RETURNING id`,
     [
       scraped.name,
@@ -207,35 +246,13 @@ async function upsertProduct(
       breakdown.totalKesCents,
       7,
       14,
+      scraped.stockStatus ?? "in_stock",
     ],
   );
 
   const productId = newProduct.id as string;
 
-  // Insert variants
-  for (let i = 0; i < scraped.variants.length; i++) {
-    const v = scraped.variants[i];
-    const variantPrice = v.priceUsdCents != null
-      ? computeProductPrice(v.priceUsdCents, scraped.weightGrams, pricingConfig, scraped.sourceCurrency).totalKesCents
-      : breakdown.totalKesCents;
-
-    await db.query(
-      `INSERT INTO product_variants (product_id, attributes, price_delta_kes_cents, image_url, sort_order)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT DO NOTHING`,
-      [
-        productId,
-        JSON.stringify(v.attributes),
-        variantPrice - breakdown.totalKesCents,
-        v.imageUrl ?? null,
-        i,
-      ],
-    );
-  }
-
-  if (scraped.variants.length > 0) {
-    await db.query(`UPDATE products SET has_variants = true WHERE id = $1`, [productId]);
-  }
+  await syncVariants(productId, scraped, breakdown, pricingConfig);
 
   return { id: productId, isNew: true };
 }

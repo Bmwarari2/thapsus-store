@@ -38,6 +38,7 @@ export interface ScrapedProduct {
   variants: ScrapedVariant[];
   tags: string[];
   brand?: string;
+  stockStatus?: StockStatus; // overall availability derived from source stock
 }
 
 export interface ScrapedVariant {

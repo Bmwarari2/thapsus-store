@@ -1,198 +1,203 @@
 /**
  * Shein product parser.
- * Shein uses the Oxylabs universal scraper (JS rendering).
- * Product data is embedded in the HTML as JSON inside <script> tags.
+ * Shein renders via the Oxylabs universal scraper (render: html). Product data is
+ * embedded as a large JSON blob assigned to `window.gbRawData`.
+ *
+ * Prices are GBP (SHEIN UK). We extract name, images, price, colour/size variants
+ * (with per-size stock for the primary colour) and an overall availability status.
  */
 
 import * as cheerio from "cheerio";
-import type { ScrapedProduct } from "@thapsus/shared";
+import type { CheerioAPI } from "cheerio";
+import type { ScrapedProduct, ScrapedVariant, StockStatus } from "@thapsus/shared";
 
-interface SheinProductData {
-  detail?: {
-    goods_id?: string | number;
-    goods_name?: string;
-    retailPrice?: { amount?: string | number };
-    salePrice?: { amount?: string | number };
-    description?: string;
-  };
-  skuList?: Array<{
-    skuPropertyList?: Array<{ propertyValueName?: string; propertyValueDisplayName?: string }>;
-    price?: { salePrice?: { amount?: string | number } };
-  }>;
-  attrList?: Array<{ attr_name?: string; attr_value?: string }>;
-  images?: Array<{ origin_image?: string; src?: string }>;
+const isObj = (x: unknown): x is Record<string, unknown> =>
+  !!x && typeof x === "object" && !Array.isArray(x);
+
+/** Prepend https: to protocol-relative SHEIN image URLs. */
+function httpsify(u?: unknown): string {
+  if (typeof u !== "string") return "";
+  const t = u.trim();
+  return t.startsWith("//") ? `https:${t}` : t;
 }
 
-function usdCents(amount?: string | number): number {
+/** GBP amount string ("11.08") → integer cents. */
+function gbpCents(amount?: unknown): number {
   if (amount == null) return 0;
-  return Math.round(parseFloat(String(amount)) * 100);
+  const n = parseFloat(String(amount));
+  return Number.isFinite(n) ? Math.round(n * 100) : 0;
 }
 
-function extractJsonFromScript(html: string, pattern: RegExp): unknown | null {
-  const match = html.match(pattern);
-  if (!match?.[1]) return null;
-  try {
-    return JSON.parse(match[1]);
-  } catch {
-    return null;
+/** Brace-match and JSON.parse the real `gbRawData = {...}` assignment. */
+function extractGbRawData(html: string): Record<string, unknown> | null {
+  const m = html.match(/gbRawData\s*=\s*\{/);
+  if (!m || m.index == null) return null;
+  const start = html.indexOf("{", m.index);
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < html.length; i++) {
+    const c = html[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "{") depth++;
+    else if (c === "}" && --depth === 0) {
+      try { return JSON.parse(html.slice(start, i + 1)); } catch { return null; }
+    }
   }
+  return null;
+}
+
+type Node = Record<string, unknown>;
+
+/** Depth-first search for the first object node matching the predicate. */
+function deepFind(root: unknown, pred: (n: Node) => boolean, maxDepth = 12): Node | null {
+  const stack: Array<[unknown, number]> = [[root, 0]];
+  while (stack.length) {
+    const [node, d] = stack.pop()!;
+    if (!node || typeof node !== "object" || d > maxDepth) continue;
+    if (isObj(node) && pred(node)) return node;
+    for (const v of Object.values(node as Node)) stack.push([v, d + 1]);
+  }
+  return null;
+}
+
+/** Build a ScrapedProduct from the parsed gbRawData blob, or null if not usable. */
+function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): ScrapedProduct | null {
+  // The product "detail" node carries goods_name + goods_id + goods_sn.
+  const detail = deepFind(gb, (n) =>
+    typeof n.goods_name === "string" && n.goods_id != null && "goods_sn" in n);
+  if (!detail) return null;
+
+  const name = String(detail.goods_name);
+  const sourceId = String(detail.goods_id ?? "");
+
+  // Price (GBP). Prefer a priceInfo node carrying both sale + retail amounts.
+  const priceNode = deepFind(gb, (n) =>
+    isObj(n.salePrice) && "amount" in (n.salePrice as Node) &&
+    isObj(n.retailPrice) && "amount" in (n.retailPrice as Node));
+  const salePrice = (priceNode?.salePrice ?? detail.salePrice) as Node | undefined;
+  const retailPrice = (priceNode?.retailPrice ?? detail.retailPrice) as Node | undefined;
+  const sourcePriceUsdCents = gbpCents(salePrice?.amount ?? retailPrice?.amount);
+  if (!name || sourcePriceUsdCents === 0) return null; // let the meta fallback try
+
+  // Colours: mainSaleAttribute.info[] entries with attr_name "Color".
+  const msa = deepFind(gb, (n) =>
+    Array.isArray(n.info) && (n.info as Node[]).some((x) => isObj(x) && x.attr_name === "Color"));
+  const colours = msa
+    ? (msa.info as Node[]).filter((c) => isObj(c) && c.attr_name === "Color")
+    : [];
+
+  // Sizes: a skc_sale_attr entry flagged as Size.
+  const sizeAttr = deepFind(gb, (n) =>
+    (n.attr_name === "Size" || n.isSize === "1") && Array.isArray(n.attr_value_list));
+  const sizes = sizeAttr ? (sizeAttr.attr_value_list as Node[]) : [];
+
+  // Per-size stock for the primary colour: comboStock.dataMap keys look like "Size__755,".
+  const combo = deepFind(gb, (n) => isObj(n.dataMap) && isObj(n.skuMap));
+  const stockBySizeId: Record<string, number> = {};
+  if (combo) {
+    for (const [k, v] of Object.entries(combo.dataMap as Record<string, unknown>)) {
+      const mm = k.match(/Size__(\d+),$/);
+      if (mm) stockBySizeId[mm[1]] = Number(v) || 0;
+    }
+  }
+
+  const productStock = Number(detail.stock ?? 0) || 0;
+  const onSale = detail.is_on_sale !== "0";
+
+  // Images: product image + each colour's image, deduped.
+  const images = [...new Set(
+    [httpsify(detail.goods_img), ...colours.map((c) => httpsify(c.goods_image))].filter(Boolean),
+  )];
+
+  // Variants: colour × size. Real per-size stock when the size-id resolves,
+  // otherwise the product-level stock as a best effort.
+  const variants: ScrapedVariant[] = [];
+  const colourList: Array<Node | null> = colours.length ? colours : [null];
+  const sizeList: Array<Node | null> = sizes.length ? sizes : [null];
+  for (const c of colourList) {
+    for (const s of sizeList) {
+      const attributes: Record<string, string> = {};
+      if (c) attributes.Color = String(c.attr_value ?? "");
+      if (s) attributes.Size = String(s.attr_value_name ?? s.attr_value_name_en ?? "");
+      if (!Object.keys(attributes).length) continue;
+      const sizeId = s ? String(s.attr_value_id ?? "") : "";
+      const stockQty = sizeId && sizeId in stockBySizeId ? stockBySizeId[sizeId] : productStock;
+      variants.push({
+        attributes,
+        imageUrl: c ? httpsify(c.goods_image) || undefined : undefined,
+        stockQty,
+      });
+    }
+  }
+
+  const totalStock = variants.length
+    ? variants.reduce((a, v) => a + (v.stockQty ?? 0), 0)
+    : productStock;
+  const stockStatus: StockStatus =
+    !onSale || totalStock <= 0 ? "out_of_stock" : totalStock <= 5 ? "low_stock" : "in_stock";
+
+  return {
+    sourcePlatform: "shein",
+    sourceUrl,
+    sourceId,
+    name,
+    description: $('meta[name="description"]').attr("content") ?? "",
+    images,
+    sourcePriceUsdCents,
+    sourceCurrency: "GBP",
+    weightGrams: 300, // Shein items are typically light clothing
+    variants,
+    stockStatus,
+    tags: [],
+  };
 }
 
 export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProduct | null {
   const $ = cheerio.load(html);
 
-  // TEMP DIAGNOSTIC: fingerprint the page we actually received so we can tell a
-  // block/challenge page from a real product page and find where data lives.
-  const fingerprint = {
-    len: html.length,
-    title: $("title").first().text().trim().slice(0, 100),
-    ogTitle: ($('meta[property="og:title"]').attr("content") ?? "").slice(0, 80),
-    ogImage: !!$('meta[property="og:image"]').attr("content"),
-    ldJson: html.includes("application/ld+json"),
-    goodsName: html.includes("goods_name"),
-    productIntro: html.includes("productIntroData"),
-    nuxt: html.includes("__NUXT__"),
-    initialState: html.includes("__INITIAL_STATE__"),
-    gbRaw: html.includes("gbRawData"),
-    blocked: /just a moment|captcha|are you a robot|access denied|cf-chl|cloudflare/i.test(html),
-  };
-  console.log("[shein:diag] fingerprint", JSON.stringify(fingerprint));
-
-  // Dump the size/colour/price subtrees as raw slices (avoids parsing 3MB).
-  const dump = (label: string, needle: string, before: number, after: number) => {
-    const i = html.indexOf(needle);
-    console.log(`[shein:diag] ${label} @${i}:`, i === -1 ? "NOT FOUND" : html.slice(i - before, i + after).replace(/\s+/g, " "));
-  };
-  dump("skc_sale_attr", '"skc_sale_attr":', 0, 1600);
-  dump("mainSaleAttribute", '"mainSaleAttribute":', 0, 1000);
-  dump("sku_list", '"sku_list":', 0, 1200);
-  dump("multiLevel", '"multiLevelSaleAttribute":', 0, 1000);
-  dump("retailPrice", '"retailPrice":{', 0, 220);
-  dump("salePrice", '"salePrice":{', 0, 220);
-  dump("stock-ctx", '"stock":"', 60, 80);
-
-  // Shein embeds product data in several possible script patterns
-  let productData: SheinProductData | null = null;
-
-  $("script").each((_, el) => {
-    const text = $(el).html() ?? "";
-
-    // Pattern 1: window.gbRawData = {...}
-    if (text.includes("gbRawData")) {
-      const m = text.match(/gbRawData\s*=\s*(\{[\s\S]+?\});?\s*(?:window|var|let|const|$)/);
-      if (m?.[1]) {
-        try { productData = JSON.parse(m[1]) as SheinProductData; } catch { /* skip */ }
-      }
+  // Primary path: the embedded gbRawData JSON blob.
+  const gb = extractGbRawData(html);
+  if (gb) {
+    const built = buildFromGbRawData($, gb, sourceUrl);
+    if (built) {
+      console.log(
+        `[shein] parsed "${built.name.slice(0, 40)}" — ${built.variants.length} variants, ` +
+          `status ${built.stockStatus}, £${(built.sourcePriceUsdCents / 100).toFixed(2)}`,
+      );
+      return built;
     }
+  }
 
-    // Pattern 2: __PAGE_CONTEXT_MODULE_MAP__ or similar embedded JSON blobs
-    if (!productData && text.includes("goods_name")) {
-      const m = text.match(/"goods_name"\s*:\s*"([^"]+)"/);
-      if (m) {
-        // Attempt to extract the surrounding object
-        const startIdx = text.lastIndexOf("{", text.indexOf(m[0]));
-        const endIdx = text.indexOf('"goods_imgs"', startIdx);
-        if (startIdx !== -1 && endIdx !== -1) {
-          try {
-            // Build minimal object from extracted fields
-            const name = m[1];
-            const priceMatch = text.match(/"amount"\s*:\s*"([\d.]+)"/);
-            const idMatch = text.match(/"goods_id"\s*:\s*(\d+)/);
-            const imgMatches = [...text.matchAll(/"origin_image"\s*:\s*"([^"]+)"/g)];
-            productData = {
-              detail: {
-                goods_id: idMatch?.[1] ?? "",
-                goods_name: name,
-                salePrice: { amount: priceMatch?.[1] ?? "0" },
-              },
-              images: imgMatches.map((m) => ({ origin_image: m[1] })),
-            };
-          } catch { /* skip */ }
-        }
-      }
-    }
+  // Fallback: meta tags only (name + single image, no variants).
+  const name = $('meta[property="og:title"]').attr("content") ?? $("h1").first().text().trim();
+  if (!name) return null;
+
+  console.warn("[shein] parsed via META-TAG FALLBACK — no variants/price detail available");
+  const priceText = $('[class*="price"]').first().text().trim();
+  const priceMatch = priceText.match(/[\d.]+/);
+  const images: string[] = [];
+  $('meta[property="og:image"]').each((_, el) => {
+    const src = $(el).attr("content");
+    if (src) images.push(httpsify(src));
   });
-
-  // Fallback: try to extract from meta tags and visible DOM
-  if (!productData) {
-    const name = $('meta[property="og:title"]').attr("content")
-      ?? $("h1").first().text().trim();
-    const priceText = $('[class*="price"]').first().text().trim();
-    const priceMatch = priceText.match(/[\d.]+/);
-    const images: string[] = [];
-    $('meta[property="og:image"]').each((_, el) => {
-      const src = $(el).attr("content");
-      if (src) images.push(src);
-    });
-
-    if (!name) return null;
-
-    console.warn("[shein] parsed via META-TAG FALLBACK — no variants/price detail available");
-    return {
-      sourcePlatform: "shein",
-      sourceUrl,
-      sourceId: sourceUrl.match(/[?&](?:goods_id|id)=(\d+)/)?.[1]
-        ?? sourceUrl.match(/-p-(\d+)/)?.[1]
-        ?? "",
-      name,
-      description: $('meta[name="description"]').attr("content") ?? "",
-      images,
-      sourcePriceUsdCents: usdCents(priceMatch?.[0]),
-      sourceCurrency: "GBP",
-      weightGrams: 300, // Shein items are typically light clothing
-      variants: [],
-      tags: [],
-    };
-  }
-
-  const pd = productData as SheinProductData;
-  const d = pd.detail;
-  if (!d?.goods_name) return null;
-
-  console.log(`[shein] parsed via JSON path — skuList length: ${pd.skuList?.length ?? 0}`);
-
-  const images: string[] = (pd.images ?? [])
-    .map((img: { origin_image?: string; src?: string }) => img.origin_image ?? img.src ?? "")
-    .filter(Boolean);
-
-  const price = d.salePrice?.amount ?? d.retailPrice?.amount ?? 0;
-
-  // Build variants from skuList
-  const variants: ScrapedProduct["variants"] = [];
-  const seenVariants = new Set<string>();
-  for (const sku of pd.skuList ?? []) {
-    const attrs: Record<string, string> = {};
-    for (const prop of sku.skuPropertyList ?? []) {
-      const key = prop.propertyValueName ?? "option";
-      attrs[key] = prop.propertyValueDisplayName ?? prop.propertyValueName ?? "";
-    }
-    const key = JSON.stringify(attrs);
-    if (!seenVariants.has(key)) {
-      seenVariants.add(key);
-      variants.push({
-        attributes: attrs,
-        priceUsdCents: usdCents(sku.price?.salePrice?.amount),
-      });
-    }
-  }
-
-  const tags = (pd.attrList ?? [])
-    .map((a: { attr_name?: string; attr_value?: string }) => `${a.attr_value ?? ""}`.toLowerCase().trim())
-    .filter((t: string) => t.length > 1 && t.length < 40)
-    .slice(0, 10);
 
   return {
     sourcePlatform: "shein",
     sourceUrl,
-    sourceId: String(d.goods_id ?? ""),
-    name: d.goods_name,
-    description: d.description ?? "",
+    sourceId: sourceUrl.match(/[?&](?:goods_id|id)=(\d+)/)?.[1]
+      ?? sourceUrl.match(/-p-(\d+)/)?.[1]
+      ?? "",
+    name,
+    description: $('meta[name="description"]').attr("content") ?? "",
     images,
-    sourcePriceUsdCents: usdCents(price),
+    sourcePriceUsdCents: gbpCents(priceMatch?.[0]),
     sourceCurrency: "GBP",
     weightGrams: 300,
-    variants,
-    tags,
+    variants: [],
+    tags: [],
   };
 }
 
@@ -225,8 +230,8 @@ export function parseSheinSearchHtml(html: string): Partial<ScrapedProduct>[] {
           sourceUrl: `https://www.shein.com/${item.goods_url_name ?? "product"}-p-${id}.html`,
           sourceId: id,
           name: item.goods_name,
-          images: item.goods_img ? [item.goods_img] : [],
-          sourcePriceUsdCents: usdCents(item.salePrice?.amount),
+          images: item.goods_img ? [httpsify(item.goods_img)] : [],
+          sourcePriceUsdCents: gbpCents(item.salePrice?.amount),
           sourceCurrency: "GBP",
           weightGrams: 300,
           variants: [],
