@@ -1,7 +1,7 @@
 # Thapsus Store — API Specification
 
 > **Base URL (dev):** `http://localhost:3001`  
-> **Base URL (prod):** `https://api.thapsus.co.ke`  
+> **Base URL (prod):** `https://api.thapsus.uk`  
 > All endpoints are prefixed with `/api`
 
 ---
@@ -213,7 +213,7 @@ Single product with variants and review summary.
   "category": { "id": "uuid", "name": "Dresses", "slug": "dresses" },
   "brand": { "id": "uuid", "name": "SHEIN" } | null,
   "tags": ["floral", "midi", "summer"],
-  "images": ["https://cdn.thapsus.co.ke/products/...jpg"],
+  "images": ["https://cdn.thapsus.uk/products/...jpg"],
   "sourcePlatform": "shein",
   "sourceUrl": "https://www.shein.com/...",
   "sourcePriceUsdCents": 1299,
@@ -232,7 +232,7 @@ Single product with variants and review summary.
       "id": "uuid",
       "attributes": { "Color": "Red", "Size": "M" },
       "priceDeltaKesCents": 0,
-      "imageUrl": "https://cdn.thapsus.co.ke/...",
+      "imageUrl": "https://cdn.thapsus.uk/...",
       "stockStatus": "in_stock",
       "sortOrder": 0
     }
@@ -893,5 +893,5 @@ Dashboard stats. All monetary values in KES cents.
 ## Environment Variables the Frontend Needs
 ```
 VITE_API_URL=http://localhost:3001/api
-VITE_R2_PUBLIC_URL=https://cdn.thapsus.co.ke
+VITE_R2_PUBLIC_URL=https://cdn.thapsus.uk
 ```

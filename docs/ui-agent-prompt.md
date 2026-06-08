@@ -387,7 +387,7 @@ apps/web/
 
 ```env
 VITE_API_URL=http://localhost:3001/api
-VITE_R2_PUBLIC_URL=https://cdn.thapsus.co.ke
+VITE_R2_PUBLIC_URL=https://cdn.thapsus.uk
 ```
 
 ---
