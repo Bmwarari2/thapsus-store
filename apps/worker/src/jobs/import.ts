@@ -42,16 +42,18 @@ async function scrapeProducts(
       const content = await fetchAlibabaProduct(sourceUrl);
       const product = parseAlibabaProduct(content, sourceUrl);
       if (product) results.push(product);
+      else console.warn(`[import] alibaba product parse returned null for ${sourceUrl}`);
     } else if (searchQuery) {
       const items = await fetchAlibabaSearch(searchQuery);
+      console.log(`[import] alibaba search "${searchQuery}" returned ${items.length} raw items`);
       for (const item of items) {
         const partial = parseAlibabaSearchItem(item);
-        if (!partial?.sourceUrl) continue;
-        // Fetch full product detail for each search result
+        if (!partial?.sourceUrl) { console.warn(`[import] alibaba search item skipped (no sourceUrl):`, JSON.stringify(item).slice(0, 200)); continue; }
         try {
           const content = await fetchAlibabaProduct(partial.sourceUrl);
           const product = parseAlibabaProduct(content, partial.sourceUrl);
           if (product) results.push(product);
+          else console.warn(`[import] alibaba product parse returned null for ${partial.sourceUrl}`);
         } catch (err) {
           console.warn(`[import] failed to fetch alibaba product ${partial.sourceUrl}:`, err);
         }
@@ -62,15 +64,18 @@ async function scrapeProducts(
       const content = await fetchAliExpressProduct(sourceUrl);
       const product = parseAliExpressProduct(content, sourceUrl);
       if (product) results.push(product);
+      else console.warn(`[import] aliexpress product parse returned null for ${sourceUrl}`);
     } else if (searchQuery) {
       const items = await fetchAliExpressSearch(searchQuery);
+      console.log(`[import] aliexpress search "${searchQuery}" returned ${items.length} raw items`);
       for (const item of items) {
         const partial = parseAliExpressSearchItem(item);
-        if (!partial?.sourceUrl) continue;
+        if (!partial?.sourceUrl) { console.warn(`[import] aliexpress search item skipped (no sourceUrl):`, JSON.stringify(item).slice(0, 200)); continue; }
         try {
           const content = await fetchAliExpressProduct(partial.sourceUrl);
           const product = parseAliExpressProduct(content, partial.sourceUrl);
           if (product) results.push(product);
+          else console.warn(`[import] aliexpress product parse returned null for ${partial.sourceUrl}`);
         } catch (err) {
           console.warn(`[import] failed to fetch aliexpress product ${partial.sourceUrl}:`, err);
         }
@@ -81,15 +86,18 @@ async function scrapeProducts(
       const html = await fetchSheinProduct(sourceUrl);
       const product = parseSheinProduct(html, sourceUrl);
       if (product) results.push(product);
+      else console.warn(`[import] shein product parse returned null for ${sourceUrl}`);
     } else if (searchQuery) {
       const html = await fetchSheinSearch(searchQuery);
       const partials = parseSheinSearchHtml(html);
+      console.log(`[import] shein search "${searchQuery}" returned ${partials.length} parsed items`);
       for (const partial of partials) {
         if (!partial.sourceUrl) continue;
         try {
           const productHtml = await fetchSheinProduct(partial.sourceUrl);
           const product = parseSheinProduct(productHtml, partial.sourceUrl);
           if (product) results.push(product);
+          else console.warn(`[import] shein product parse returned null for ${partial.sourceUrl}`);
         } catch (err) {
           console.warn(`[import] failed to fetch shein product ${partial.sourceUrl}:`, err);
         }
