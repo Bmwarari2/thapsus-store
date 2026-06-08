@@ -58,33 +58,18 @@ export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProdu
   };
   console.log("[shein:diag] fingerprint", JSON.stringify(fingerprint));
 
-  // Show the real container by dumping context around the first "goods_name",
-  // and map every occurrence of gbRawData / productIntro-like assignments.
-  const gn = html.indexOf("goods_name");
-  if (gn !== -1) {
-    console.log("[shein:diag] goods_name ctx:", html.slice(gn - 120, gn + 1400).replace(/\s+/g, " "));
-  }
-  const occ = (needle: string) => {
-    const idxs: number[] = [];
-    let i = html.indexOf(needle);
-    while (i !== -1 && idxs.length < 5) { idxs.push(i); i = html.indexOf(needle, i + 1); }
-    return idxs;
+  // Dump the size/colour/price subtrees as raw slices (avoids parsing 3MB).
+  const dump = (label: string, needle: string, before: number, after: number) => {
+    const i = html.indexOf(needle);
+    console.log(`[shein:diag] ${label} @${i}:`, i === -1 ? "NOT FOUND" : html.slice(i - before, i + after).replace(/\s+/g, " "));
   };
-  for (const needle of ["gbRawData", "productIntro", "saleAttr", "skc_", "mall_code", "priceCurrency"]) {
-    const idxs = occ(needle);
-    console.log(`[shein:diag] occ "${needle}": ${idxs.length} ->`,
-      idxs.map((i) => html.slice(i, i + 50).replace(/\s+/g, " ")).join(" || "));
-  }
-
-  // DOM scan: are sizes/colours rendered as elements rather than JSON?
-  const sample = (sel: string) =>
-    $(sel).slice(0, 8).map((_, el) => $(el).attr("aria-label") || $(el).attr("title") || $(el).text().trim().slice(0, 24)).get().filter(Boolean);
-  for (const sel of [
-    '[class*="size"]', '[class*="Size"]', '[class*="color"]', '[class*="Color"]',
-    '[aria-label*="size" i]', '[class*="attr"]', '[class*="sold-out"]', '[class*="soldout"]',
-  ]) {
-    console.log(`[shein:diag] dom ${sel}: count=${$(sel).length} sample=${JSON.stringify(sample(sel))}`);
-  }
+  dump("skc_sale_attr", '"skc_sale_attr":', 0, 1600);
+  dump("mainSaleAttribute", '"mainSaleAttribute":', 0, 1000);
+  dump("sku_list", '"sku_list":', 0, 1200);
+  dump("multiLevel", '"multiLevelSaleAttribute":', 0, 1000);
+  dump("retailPrice", '"retailPrice":{', 0, 220);
+  dump("salePrice", '"salePrice":{', 0, 220);
+  dump("stock-ctx", '"stock":"', 60, 80);
 
   // Shein embeds product data in several possible script patterns
   let productData: SheinProductData | null = null;
