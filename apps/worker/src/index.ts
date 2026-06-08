@@ -6,6 +6,7 @@
  */
 
 import { Worker, Queue } from "bullmq";
+import { createServer } from "node:http";
 import { config } from "dotenv";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -79,7 +80,7 @@ async function registerScheduledJobs(): Promise<void> {
     {},
     {
       repeat: { pattern: "0 23 * * *" },
-      jobId: "scheduled:exchange-rate",
+      jobId: "scheduled-exchange-rate",
     },
   );
 
@@ -109,17 +110,39 @@ async function registerScheduledJobs(): Promise<void> {
     {},
     {
       delay: 0,
-      jobId: "startup:exchange-rate",
+      jobId: "startup-exchange-rate",
     },
   );
 
   console.log("[worker] scheduled jobs registered");
 }
 
+// ── Health server ─────────────────────────────────────────────────────────────
+// The worker is not an HTTP service, but Railway's deploy healthcheck probes
+// /healthz. Expose a minimal endpoint so the deployment is marked healthy.
+
+function startHealthServer(): void {
+  const port = Number(process.env.PORT) || 3000;
+  const server = createServer((req, res) => {
+    if (req.url === "/healthz") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("ok");
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  server.listen(port, () => {
+    console.log(`[worker] health server listening on :${port}`);
+  });
+}
+
 // ── Startup ───────────────────────────────────────────────────────────────────
 
 async function start(): Promise<void> {
   console.log("[worker] starting Thapsus scraping worker...");
+
+  startHealthServer();
 
   try {
     await registerScheduledJobs();
