@@ -1,0 +1,116 @@
+/**
+ * Oxylabs Realtime API client.
+ * Handles authentication, retries, and rate-limit back-off.
+ */
+
+const OXYLABS_URL = "https://realtime.oxylabs.io/v1/queries";
+const MAX_RETRIES = 3;
+
+function getAuth(): string {
+  const user = process.env.OXYLABS_USERNAME;
+  const pass = process.env.OXYLABS_PASSWORD;
+  if (!user || !pass) throw new Error("OXYLABS_USERNAME / OXYLABS_PASSWORD not set");
+  return `Basic ${Buffer.from(`${user}:${pass}`).toString("base64")}`;
+}
+
+async function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+export interface OxyResponse {
+  results: Array<{
+    content: unknown;
+    status_code: number;
+    url: string;
+  }>;
+}
+
+export async function oxyRequest(payload: Record<string, unknown>): Promise<OxyResponse> {
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(OXYLABS_URL, {
+        method: "POST",
+        headers: {
+          Authorization: getAuth(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(60_000),
+      });
+
+      if (res.status === 429) {
+        const wait = attempt * 10_000;
+        console.warn(`[oxylabs] rate limited, waiting ${wait}ms (attempt ${attempt})`);
+        await sleep(wait);
+        continue;
+      }
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(`Oxylabs HTTP ${res.status}: ${text.slice(0, 200)}`);
+      }
+
+      return (await res.json()) as OxyResponse;
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      if (attempt < MAX_RETRIES) {
+        await sleep(attempt * 2_000);
+      }
+    }
+  }
+
+  throw lastError ?? new Error("Oxylabs request failed after retries");
+}
+
+// ── Alibaba ───────────────────────────────────────────────────────────────────
+
+export async function fetchAlibabaProduct(url: string): Promise<unknown> {
+  const data = await oxyRequest({ source: "alibaba_product", url, parse: true });
+  return data.results[0]?.content ?? null;
+}
+
+export async function fetchAlibabaSearch(query: string): Promise<unknown[]> {
+  const searchUrl = `https://www.alibaba.com/trade/search?SearchText=${encodeURIComponent(query)}&IndexArea=product_en`;
+  const data = await oxyRequest({ source: "alibaba_search", url: searchUrl, parse: true });
+  const content = data.results[0]?.content as { items?: unknown[] } | null;
+  return content?.items ?? [];
+}
+
+// ── AliExpress ────────────────────────────────────────────────────────────────
+
+export async function fetchAliExpressProduct(url: string): Promise<unknown> {
+  const data = await oxyRequest({ source: "aliexpress_product", url, parse: true });
+  return data.results[0]?.content ?? null;
+}
+
+export async function fetchAliExpressSearch(query: string): Promise<unknown[]> {
+  const searchUrl = `https://www.aliexpress.com/wholesale?SearchText=${encodeURIComponent(query)}`;
+  const data = await oxyRequest({ source: "aliexpress_search", url: searchUrl, parse: true });
+  const content = data.results[0]?.content as { products?: unknown[] } | null;
+  return content?.products ?? [];
+}
+
+// ── Shein (universal renderer) ────────────────────────────────────────────────
+
+export async function fetchSheinProduct(url: string): Promise<string> {
+  const data = await oxyRequest({
+    source: "universal",
+    url,
+    render: "html",
+    parse: false,
+  });
+  return (data.results[0]?.content as string) ?? "";
+}
+
+export async function fetchSheinSearch(query: string): Promise<string> {
+  const searchUrl = `https://www.shein.com/pdsearch/${encodeURIComponent(query)}/`;
+  const data = await oxyRequest({
+    source: "universal",
+    url: searchUrl,
+    render: "html",
+    parse: false,
+  });
+  return (data.results[0]?.content as string) ?? "";
+}

@@ -157,17 +157,23 @@ importers:
       '@thapsus/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@types/pg':
+        specifier: ^8.20.0
+        version: 8.20.0
       bullmq:
         specifier: ^5.4.0
         version: 5.78.0
       cheerio:
         specifier: ^1.0.0
         version: 1.2.0
+      dotenv:
+        specifier: ^17.4.2
+        version: 17.4.2
       ioredis:
         specifier: ^5.3.2
         version: 5.11.1
       pg:
-        specifier: ^8.13.0
+        specifier: ^8.21.0
         version: 8.21.0
     devDependencies:
       '@types/node':
