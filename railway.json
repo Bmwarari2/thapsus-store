@@ -2,10 +2,10 @@
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
     "builder": "NIXPACKS",
-    "buildCommand": "pnpm --filter @thapsus/shared build && pnpm --filter @thapsus/web build && pnpm --filter @thapsus/api build"
+    "buildCommand": "pnpm --filter @thapsus/shared build && pnpm --filter @thapsus/web build && pnpm --filter @thapsus/api build && pnpm --filter @thapsus/worker build"
   },
   "deploy": {
-    "startCommand": "node apps/api/dist/server.js",
+    "startCommand": "sh start.sh",
     "healthcheckPath": "/healthz",
     "healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
