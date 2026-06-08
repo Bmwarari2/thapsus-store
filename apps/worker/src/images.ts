@@ -10,6 +10,15 @@ let _s3: S3Client | null = null;
 function getS3(): S3Client | null {
   if (!process.env.R2_ACCESS_KEY_ID || !process.env.R2_ENDPOINT) return null;
   if (!_s3) {
+    const keyId = process.env.R2_ACCESS_KEY_ID ?? "";
+    // Diagnostic: log the live R2 config (masked) so we can verify the running
+    // container's env matches the Cloudflare token/bucket.
+    console.log(
+      `[images] R2 config — endpoint=${process.env.R2_ENDPOINT} ` +
+        `bucket=${JSON.stringify(process.env.R2_BUCKET)} ` +
+        `accessKeyId=${keyId.slice(0, 6)}…${keyId.slice(-4)} (len ${keyId.length}) ` +
+        `secretLen=${(process.env.R2_SECRET_ACCESS_KEY ?? "").length}`,
+    );
     _s3 = new S3Client({
       region: "auto",
       endpoint: process.env.R2_ENDPOINT,
