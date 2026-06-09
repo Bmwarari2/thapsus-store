@@ -73,13 +73,24 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
   const name = String(detail.goods_name);
   const sourceId = String(detail.goods_id ?? "");
 
-  // Price (GBP). Prefer a priceInfo node carrying both sale + retail amounts.
-  const priceNode = deepFind(gb, (n) =>
-    isObj(n.salePrice) && "amount" in (n.salePrice as Node) &&
-    isObj(n.retailPrice) && "amount" in (n.retailPrice as Node));
-  const salePrice = (priceNode?.salePrice ?? detail.salePrice) as Node | undefined;
-  const retailPrice = (priceNode?.retailPrice ?? detail.retailPrice) as Node | undefined;
-  const sourcePriceUsdCents = gbpCents(salePrice?.amount ?? retailPrice?.amount);
+  // TEMP DIAGNOSTIC: which price fields does the detail node carry?
+  console.log("[shein:diag] detail price fields:", JSON.stringify(
+    Object.fromEntries(Object.entries(detail).filter(([k]) => /price|discount|mall|amount/i.test(k))),
+  ).slice(0, 700));
+
+  // Price (GBP) = the product's displayed price, which lives on the `detail`
+  // node. Only fall back to a deep priceInfo node if detail has none.
+  const detailSale = isObj(detail.salePrice) ? (detail.salePrice as Node) : undefined;
+  const detailRetail = isObj(detail.retailPrice) ? (detail.retailPrice as Node) : undefined;
+  let priceAmount = detailSale?.amount ?? detailRetail?.amount;
+  if (priceAmount == null) {
+    const priceNode = deepFind(gb, (n) =>
+      isObj(n.salePrice) && "amount" in (n.salePrice as Node) &&
+      isObj(n.retailPrice) && "amount" in (n.retailPrice as Node));
+    priceAmount = (priceNode?.salePrice as Node | undefined)?.amount
+      ?? (priceNode?.retailPrice as Node | undefined)?.amount;
+  }
+  const sourcePriceUsdCents = gbpCents(priceAmount);
   if (!name || sourcePriceUsdCents === 0) return null; // let the meta fallback try
 
   // Colours: mainSaleAttribute.info[] entries with attr_name "Color".
@@ -204,6 +215,31 @@ export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProdu
 export function parseSheinSearchHtml(html: string): Partial<ScrapedProduct>[] {
   const $ = cheerio.load(html);
   const results: Partial<ScrapedProduct>[] = [];
+
+  // TEMP DIAGNOSTIC: locate the product list on the search page.
+  const gb = extractGbRawData(html);
+  console.log("[shein:search:diag] len", html.length, "gbRaw", !!gb,
+    "goods_list", html.includes("goods_list"), "goods_id@", html.indexOf("goods_id"));
+  if (gb) {
+    console.log("[shein:search:diag] gbRawData keys:", Object.keys(gb).join(","));
+    // Find an array of items that look like products (have goods_id + goods_name).
+    const stack: Array<[unknown, string, number]> = [[gb, "gb", 0]];
+    while (stack.length) {
+      const [node, path, d] = stack.pop()!;
+      if (!node || typeof node !== "object" || d > 8) continue;
+      if (Array.isArray(node)) {
+        const first = node[0];
+        if (isObj(first) && ("goods_id" in first || "goods_name" in first)) {
+          console.log(`[shein:search:diag] product array at ${path} len=${node.length} keys=${Object.keys(first).slice(0, 25).join(",")}`);
+        }
+        node.forEach((v, i) => stack.push([v, `${path}[${i}]`, d + 1]));
+      } else {
+        for (const [k, v] of Object.entries(node)) stack.push([v, `${path}.${k}`, d + 1]);
+      }
+    }
+  }
+  const gid = html.indexOf("goods_id");
+  if (gid !== -1) console.log("[shein:search:diag] goods_id ctx:", html.slice(gid - 40, gid + 360).replace(/\s+/g, " "));
 
   // Shein search results embed product list in script JSON
   $("script").each((_, el) => {
