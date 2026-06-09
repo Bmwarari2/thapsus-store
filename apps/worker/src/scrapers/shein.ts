@@ -183,6 +183,34 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
   };
 }
 
+/** Colour swatches with their own product pages (for per-colour gallery fetches). */
+export function sheinColorTargets(html: string): Array<{ color: string; url: string; isDefault: boolean }> {
+  const gb = extractGbRawData(html);
+  if (!gb) return [];
+  const detail = deepFind(gb, (n) =>
+    typeof n.goods_name === "string" && n.goods_id != null && "goods_sn" in n);
+  const sourceId = String(detail?.goods_id ?? "");
+  const msa = deepFind(gb, (n) =>
+    Array.isArray(n.info) && (n.info as Node[]).some((x) => isObj(x) && x.attr_name === "Color"));
+  const colours = msa ? (msa.info as Node[]).filter((c) => isObj(c) && c.attr_name === "Color") : [];
+  return colours
+    .map((c) => {
+      const color = String(c.attr_value ?? "");
+      const id = String(c.goods_id ?? "");
+      const urlName = String(c.goods_url_name ?? "product").trim().replace(/\s+/g, "-");
+      return { color, url: `https://www.shein.co.uk/${urlName}-p-${id}.html`, isDefault: id === sourceId };
+    })
+    .filter((t) => t.color && /-p-\d+/.test(t.url));
+}
+
+/** The full image gallery for a single SKC/colour page (`skcImages`). */
+export function sheinSkcImages(html: string): string[] {
+  const gb = extractGbRawData(html);
+  if (!gb) return [];
+  const node = deepFind(gb, (n) => Array.isArray(n.skcImages) && (n.skcImages as unknown[]).length > 0);
+  return node ? (node.skcImages as unknown[]).map(httpsify).filter(Boolean) : [];
+}
+
 export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProduct | null {
   const $ = cheerio.load(html);
 

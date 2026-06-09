@@ -19,7 +19,7 @@ import {
 } from "../scrapers/oxylabs.js";
 import { parseAlibabaProduct, parseAlibabaSearchItem } from "../scrapers/alibaba.js";
 import { parseAliExpressProduct, parseAliExpressSearchItem } from "../scrapers/aliexpress.js";
-import { parseSheinProduct, parseSheinSearchHtml } from "../scrapers/shein.js";
+import { parseSheinProduct, parseSheinSearchHtml, sheinColorTargets, sheinSkcImages } from "../scrapers/shein.js";
 
 export interface ImportJobPayload {
   jobId: string;
@@ -79,6 +79,65 @@ function buildImageMap(sourceUrls: string[], cdnUrls: string[]): Map<string, str
   return map;
 }
 
+const MAX_SHEIN_COLOR_FETCHES = 12;
+
+/** Run an async fn over items with bounded concurrency. */
+async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = [];
+  let i = 0;
+  const run = async () => {
+    while (i < items.length) {
+      const idx = i++;
+      out[idx] = await fn(items[idx]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, run));
+  return out;
+}
+
+/**
+ * Fetch each colour's own product page to collect its full image gallery, then
+ * rebuild the product gallery with each colour's images grouped together and
+ * point every variant at its colour's first image. Costs one extra Oxylabs
+ * fetch per non-default colour (capped, bounded concurrency).
+ */
+async function enrichSheinColorGalleries(product: ScrapedProduct, mainHtml: string): Promise<void> {
+  const targets = sheinColorTargets(mainHtml).slice(0, MAX_SHEIN_COLOR_FETCHES);
+  if (targets.length <= 1) return; // single colour — nothing to enrich
+
+  const galleries: Record<string, string[]> = {};
+  await mapLimit(targets, 3, async (t) => {
+    try {
+      const imgs = t.isDefault ? sheinSkcImages(mainHtml) : sheinSkcImages(await fetchSheinProduct(t.url));
+      if (imgs.length) galleries[t.color] = imgs;
+    } catch (err) {
+      console.warn(`[import] shein colour gallery fetch failed for "${t.color}":`, err);
+    }
+  });
+
+  // Fall back to the colour's existing single image where a gallery wasn't found.
+  for (const v of product.variants) {
+    const c = v.attributes.Color;
+    if (c && !galleries[c]?.length && v.imageUrl) galleries[c] = [v.imageUrl];
+  }
+
+  // Rebuild the product gallery: colours in order, images grouped per colour.
+  const ordered: string[] = [];
+  for (const t of targets) {
+    for (const img of galleries[t.color] ?? []) if (!ordered.includes(img)) ordered.push(img);
+  }
+  if (ordered.length) product.images = ordered;
+
+  // Each variant points at its colour's first image (which is part of the gallery).
+  for (const v of product.variants) {
+    const c = v.attributes.Color;
+    if (c && galleries[c]?.length) v.imageUrl = galleries[c][0];
+  }
+
+  const total = Object.values(galleries).reduce((a, g) => a + g.length, 0);
+  console.log(`[import] shein enriched ${Object.keys(galleries).length} colours, ${total} images`);
+}
+
 async function scrapeProducts(
   platform: string,
   sourceUrl: string | null,
@@ -134,8 +193,10 @@ async function scrapeProducts(
     if (sourceUrl) {
       const html = await fetchSheinProduct(sourceUrl);
       const product = parseSheinProduct(html, sourceUrl);
-      if (product) results.push(product);
-      else console.warn(`[import] shein product parse returned null for ${sourceUrl}`);
+      if (product) {
+        await enrichSheinColorGalleries(product, html);
+        results.push(product);
+      } else console.warn(`[import] shein product parse returned null for ${sourceUrl}`);
     } else if (searchQuery) {
       const html = await fetchSheinSearch(searchQuery);
       const partials = parseSheinSearchHtml(html);
@@ -145,8 +206,10 @@ async function scrapeProducts(
         try {
           const productHtml = await fetchSheinProduct(partial.sourceUrl);
           const product = parseSheinProduct(productHtml, partial.sourceUrl);
-          if (product) results.push(product);
-          else console.warn(`[import] shein product parse returned null for ${partial.sourceUrl}`);
+          if (product) {
+            await enrichSheinColorGalleries(product, productHtml);
+            results.push(product);
+          } else console.warn(`[import] shein product parse returned null for ${partial.sourceUrl}`);
         } catch (err) {
           console.warn(`[import] failed to fetch shein product ${partial.sourceUrl}:`, err);
         }

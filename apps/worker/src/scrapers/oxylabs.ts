@@ -117,14 +117,19 @@ export async function fetchSheinProduct(url: string): Promise<string> {
 export async function fetchSheinSearch(query: string): Promise<string> {
   // Use the UK storefront to match the working product pages.
   const searchUrl = `https://www.shein.co.uk/pdsearch/${encodeURIComponent(query)}/`;
-  const data = await oxyRequest({
-    source: "universal",
-    url: searchUrl,
-    render: "html",
-    parse: false,
-  });
-  const r = data.results[0];
-  const content = (r?.content as string) ?? "";
-  console.log(`[shein:search:diag] fetch url=${searchUrl} status=${r?.status_code} len=${content.length}`);
-  return content;
+
+  // Attempt 1: rendered HTML (matches the product-page approach).
+  const a = await oxyRequest({ source: "universal", url: searchUrl, render: "html", parse: false });
+  const ra = a.results[0];
+  const ca = (ra?.content as string) ?? "";
+  console.log(`[shein:search:diag] render=html status=${ra?.status_code} len=${ca.length} resp=${JSON.stringify(a).slice(0, 400)}`);
+  if (ca.length > 1000) return ca;
+
+  // Attempt 2: no render — SHEIN server-renders gbRawData, so raw HTML may suffice
+  // and avoids render-time faults (Oxylabs 613).
+  const b = await oxyRequest({ source: "universal", url: searchUrl, parse: false });
+  const rb = b.results[0];
+  const cb = (rb?.content as string) ?? "";
+  console.log(`[shein:search:diag] no-render status=${rb?.status_code} len=${cb.length}`);
+  return cb.length ? cb : ca;
 }
