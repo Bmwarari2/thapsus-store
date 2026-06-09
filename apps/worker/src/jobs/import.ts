@@ -36,6 +36,7 @@ async function syncVariants(
   scraped: ScrapedProduct,
   breakdown: ReturnType<typeof computeProductPrice>,
   pricingConfig: ReturnType<typeof parsePricingConfig>,
+  imageMap: Map<string, string>,
 ): Promise<void> {
   await db.query(`DELETE FROM product_variants WHERE product_id = $1`, [productId]);
 
@@ -44,6 +45,9 @@ async function syncVariants(
     const variantPrice = v.priceUsdCents != null
       ? computeProductPrice(v.priceUsdCents, scraped.weightGrams, pricingConfig, scraped.sourceCurrency).totalKesCents
       : breakdown.totalKesCents;
+
+    // Point the variant at the R2 copy of its colour image (so it matches the gallery).
+    const imageUrl = (v.imageUrl && imageMap.get(v.imageUrl)) || v.imageUrl || null;
 
     await db.query(
       `INSERT INTO product_variants
@@ -54,7 +58,7 @@ async function syncVariants(
         JSON.stringify(v.attributes),
         variantPrice - breakdown.totalKesCents,
         v.stockQty ?? 0,
-        v.imageUrl ?? null,
+        imageUrl,
         i,
       ],
     );
@@ -64,6 +68,15 @@ async function syncVariants(
     `UPDATE products SET has_variants = $2 WHERE id = $1`,
     [productId, scraped.variants.length > 0],
   );
+}
+
+/** Map each scraped source image URL to its uploaded R2/CDN URL (by position). */
+function buildImageMap(sourceUrls: string[], cdnUrls: string[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (let i = 0; i < sourceUrls.length; i++) {
+    if (cdnUrls[i]) map.set(sourceUrls[i], cdnUrls[i]);
+  }
+  return map;
 }
 
 async function scrapeProducts(
@@ -208,7 +221,7 @@ async function upsertProduct(
       ],
     );
 
-    await syncVariants(productId, scraped, breakdown, pricingConfig);
+    await syncVariants(productId, scraped, breakdown, pricingConfig, buildImageMap(scraped.images, cdnImages));
     return { id: productId, isNew: false };
   }
 
@@ -252,7 +265,7 @@ async function upsertProduct(
 
   const productId = newProduct.id as string;
 
-  await syncVariants(productId, scraped, breakdown, pricingConfig);
+  await syncVariants(productId, scraped, breakdown, pricingConfig, buildImageMap(scraped.images, cdnImages));
 
   return { id: productId, isNew: true };
 }

@@ -76,6 +76,13 @@ export const ProductDetailPage = () => {
 
   const colors = [...new Set(variants.map(v => v.attributes.Color).filter(Boolean))];
   const uniqueSizes = [...new Set(variants.map(v => v.attributes.Size).filter(Boolean))];
+
+  // First image seen for each colour — used for swatches and gallery switching.
+  const colorImage: Record<string, string> = {};
+  for (const v of variants) {
+    const c = v.attributes.Color;
+    if (c && v.imageUrl && !colorImage[c]) colorImage[c] = v.imageUrl;
+  }
   const sizesForColor = selectedColor
     ? variants.filter(v => v.attributes.Color === selectedColor)
     : variants;
@@ -103,6 +110,13 @@ export const ProductDetailPage = () => {
   const images = product.images.length > 0
     ? product.images
     : ['https://images.unsplash.com/photo-1515372039744-b8f02a3ae446?auto=format&fit=crop&w=800&q=80'];
+
+  const handleSelectColor = (color: string) => {
+    setSelectedColor(color);
+    setSelectedSize(null);
+    const idx = colorImage[color] ? images.indexOf(colorImage[color]) : -1;
+    if (idx >= 0) emblaApi?.scrollTo(idx);
+  };
 
   return (
     <div className="container mx-auto px-4 py-8">
@@ -214,16 +228,21 @@ export const ProductDetailPage = () => {
                   <h3 className="text-sm font-semibold mb-3">
                     Color: <span className="font-normal text-textSecondary">{selectedColor || 'Select'}</span>
                   </h3>
-                  <div className="flex gap-3">
+                  <div className="flex flex-wrap gap-3">
                     {colors.map(color => (
                       <button
                         key={color}
-                        onClick={() => { setSelectedColor(color); setSelectedSize(null); }}
-                        className={`w-10 h-10 rounded-full border-2 transition-all p-0.5 ${
+                        title={color}
+                        onClick={() => handleSelectColor(color)}
+                        className={`w-12 h-12 rounded-full border-2 transition-all p-0.5 overflow-hidden ${
                           selectedColor === color ? 'border-primary' : 'border-transparent hover:border-gray-300'
                         }`}
                       >
-                        <div className="w-full h-full rounded-full" style={{ backgroundColor: color.toLowerCase() }} />
+                        {colorImage[color] ? (
+                          <img src={colorImage[color]} alt={color} className="w-full h-full rounded-full object-cover" />
+                        ) : (
+                          <div className="w-full h-full rounded-full" style={{ backgroundColor: color.toLowerCase() }} />
+                        )}
                       </button>
                     ))}
                   </div>

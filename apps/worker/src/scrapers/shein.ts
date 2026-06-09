@@ -102,11 +102,6 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
   }
   if (!name || sourcePriceUsdCents === 0) return null; // let the meta fallback try
 
-  // TEMP DIAGNOSTIC: SKC price map + colour/skc node shapes (for multi-image work).
-  console.log("[shein:diag] sourceId", sourceId, "match", !!matchSkc, "skcCount", skcNodes.length,
-    "map", skcNodes.slice(0, 8).map((s) => `${s.goods_id}:£${(skcSale(s) / 100).toFixed(2)}`).join(","));
-  if (skcNodes[0]) console.log("[shein:diag] skc keys:", Object.keys(skcNodes[0]).join(","));
-
   // Colours: mainSaleAttribute.info[] entries with attr_name "Color".
   const msa = deepFind(gb, (n) =>
     Array.isArray(n.info) && (n.info as Node[]).some((x) => isObj(x) && x.attr_name === "Color"));
@@ -132,13 +127,21 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
   const productStock = Number(detail.stock ?? 0) || 0;
   const onSale = detail.is_on_sale !== "0";
 
-  // Images: product image + each colour's image, deduped.
-  const images = [...new Set(
-    [httpsify(detail.goods_img), ...colours.map((c) => httpsify(c.goods_image))].filter(Boolean),
-  )];
+  // The default colour (selected SKC) ships a full gallery in `skcImages`; other
+  // colours only carry a single representative image. Build the product gallery
+  // from every colour's image plus the default colour's extra shots, deduped.
+  const colourImage = (c: Node): string => httpsify(c.goods_image);
+  const skcImgNode = deepFind(gb, (n) => Array.isArray(n.skcImages) && (n.skcImages as unknown[]).length > 0);
+  const skcImages = skcImgNode ? (skcImgNode.skcImages as unknown[]).map(httpsify).filter(Boolean) : [];
+  const images = [...new Set([
+    ...colours.map(colourImage),
+    ...skcImages,
+    httpsify(detail.goods_img),
+  ].filter(Boolean))];
 
   // Variants: colour × size. Real per-size stock when the size-id resolves,
-  // otherwise the product-level stock as a best effort.
+  // otherwise the product-level stock as a best effort. Each variant points at
+  // its colour image (which is part of `images`, so the storefront can map them).
   const variants: ScrapedVariant[] = [];
   const colourList: Array<Node | null> = colours.length ? colours : [null];
   const sizeList: Array<Node | null> = sizes.length ? sizes : [null];
@@ -152,7 +155,7 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
       const stockQty = sizeId && sizeId in stockBySizeId ? stockBySizeId[sizeId] : productStock;
       variants.push({
         attributes,
-        imageUrl: c ? httpsify(c.goods_image) || undefined : undefined,
+        imageUrl: c ? colourImage(c) || undefined : undefined,
         stockQty,
       });
     }
@@ -182,15 +185,6 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
 
 export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProduct | null {
   const $ = cheerio.load(html);
-
-  // TEMP DIAGNOSTIC: find where per-colour image galleries live.
-  for (const key of [
-    "detailImage", "goods_imgs", "spuImages", "detail_image", "goodsImgList",
-    "color_image", "goods_relation_color", "middleImage", "series", "imgList", "detailImgList",
-  ]) {
-    const i = html.indexOf(`"${key}"`);
-    if (i !== -1) console.log(`[shein:diag] imgkey ${key} @${i}:`, html.slice(i, i + 240).replace(/\s+/g, " "));
-  }
 
   // Primary path: the embedded gbRawData JSON blob.
   const gb = extractGbRawData(html);
