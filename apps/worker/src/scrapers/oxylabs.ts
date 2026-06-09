@@ -115,12 +115,16 @@ export async function fetchSheinProduct(url: string): Promise<string> {
 }
 
 export async function fetchSheinSearch(query: string): Promise<string> {
-  const searchUrl = `https://www.shein.com/pdsearch/${encodeURIComponent(query)}/`;
+  // Use the UK storefront to match the working product pages.
+  const searchUrl = `https://www.shein.co.uk/pdsearch/${encodeURIComponent(query)}/`;
   const data = await oxyRequest({
     source: "universal",
     url: searchUrl,
     render: "html",
     parse: false,
   });
-  return (data.results[0]?.content as string) ?? "";
+  const r = data.results[0];
+  const content = (r?.content as string) ?? "";
+  console.log(`[shein:search:diag] fetch url=${searchUrl} status=${r?.status_code} len=${content.length}`);
+  return content;
 }

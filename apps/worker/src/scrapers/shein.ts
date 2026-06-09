@@ -73,25 +73,39 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
   const name = String(detail.goods_name);
   const sourceId = String(detail.goods_id ?? "");
 
-  // TEMP DIAGNOSTIC: which price fields does the detail node carry?
-  console.log("[shein:diag] detail price fields:", JSON.stringify(
-    Object.fromEntries(Object.entries(detail).filter(([k]) => /price|discount|mall|amount/i.test(k))),
-  ).slice(0, 700));
+  // Collect every SKC node (each colour carries its own sku_list + priceInfo).
+  const skcNodes: Node[] = [];
+  (function collect(node: unknown, d: number) {
+    if (!node || typeof node !== "object" || d > 12) return;
+    if (isObj(node) && Array.isArray(node.sku_list)) skcNodes.push(node);
+    for (const v of Object.values(node as Node)) collect(v, d + 1);
+  })(gb, 0);
 
-  // Price (GBP) = the product's displayed price, which lives on the `detail`
-  // node. Only fall back to a deep priceInfo node if detail has none.
-  const detailSale = isObj(detail.salePrice) ? (detail.salePrice as Node) : undefined;
-  const detailRetail = isObj(detail.retailPrice) ? (detail.retailPrice as Node) : undefined;
-  let priceAmount = detailSale?.amount ?? detailRetail?.amount;
-  if (priceAmount == null) {
-    const priceNode = deepFind(gb, (n) =>
-      isObj(n.salePrice) && "amount" in (n.salePrice as Node) &&
-      isObj(n.retailPrice) && "amount" in (n.retailPrice as Node));
-    priceAmount = (priceNode?.salePrice as Node | undefined)?.amount
-      ?? (priceNode?.retailPrice as Node | undefined)?.amount;
+  const skcSale = (skc: Node): number => {
+    const sku0 = (skc.sku_list as Node[])[0];
+    const pi = isObj(sku0) ? (sku0.priceInfo as Node | undefined) : undefined;
+    return gbpCents((pi?.salePrice as Node | undefined)?.amount);
+  };
+
+  // Price (GBP) = the default colour (SKC whose goods_id matches the product),
+  // else the lowest sale price across colours, else any deep priceInfo node.
+  let sourcePriceUsdCents = 0;
+  const matchSkc = skcNodes.find((s) => String(s.goods_id) === sourceId);
+  if (matchSkc) sourcePriceUsdCents = skcSale(matchSkc);
+  if (sourcePriceUsdCents === 0 && skcNodes.length) {
+    const amts = skcNodes.map(skcSale).filter((n) => n > 0);
+    if (amts.length) sourcePriceUsdCents = Math.min(...amts);
   }
-  const sourcePriceUsdCents = gbpCents(priceAmount);
+  if (sourcePriceUsdCents === 0) {
+    const priceNode = deepFind(gb, (n) => isObj(n.salePrice) && "amount" in (n.salePrice as Node));
+    sourcePriceUsdCents = gbpCents((priceNode?.salePrice as Node | undefined)?.amount);
+  }
   if (!name || sourcePriceUsdCents === 0) return null; // let the meta fallback try
+
+  // TEMP DIAGNOSTIC: SKC price map + colour/skc node shapes (for multi-image work).
+  console.log("[shein:diag] sourceId", sourceId, "match", !!matchSkc, "skcCount", skcNodes.length,
+    "map", skcNodes.slice(0, 8).map((s) => `${s.goods_id}:£${(skcSale(s) / 100).toFixed(2)}`).join(","));
+  if (skcNodes[0]) console.log("[shein:diag] skc keys:", Object.keys(skcNodes[0]).join(","));
 
   // Colours: mainSaleAttribute.info[] entries with attr_name "Color".
   const msa = deepFind(gb, (n) =>
@@ -168,6 +182,15 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
 
 export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProduct | null {
   const $ = cheerio.load(html);
+
+  // TEMP DIAGNOSTIC: find where per-colour image galleries live.
+  for (const key of [
+    "detailImage", "goods_imgs", "spuImages", "detail_image", "goodsImgList",
+    "color_image", "goods_relation_color", "middleImage", "series", "imgList", "detailImgList",
+  ]) {
+    const i = html.indexOf(`"${key}"`);
+    if (i !== -1) console.log(`[shein:diag] imgkey ${key} @${i}:`, html.slice(i, i + 240).replace(/\s+/g, " "));
+  }
 
   // Primary path: the embedded gbRawData JSON blob.
   const gb = extractGbRawData(html);
