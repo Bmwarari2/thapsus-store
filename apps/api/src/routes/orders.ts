@@ -139,6 +139,7 @@ r.post("/quote", async (req, res) => {
       promotionId,
       cfg.usdToKesRate,
       cfg.gbpToKesRate,
+      expiresAt.toISOString(),
     ],
   );
 

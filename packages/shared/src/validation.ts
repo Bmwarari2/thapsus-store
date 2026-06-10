@@ -95,6 +95,11 @@ export const UpdateProductSchema = CreateProductSchema.partial();
 // Alibaba is dropped from the customer-facing pipeline (B2B/MOQ pricing would
 // misquote retail customers).
 
+const PLATFORM_HOSTS: Record<string, RegExp> = {
+  shein: /(^|\.)shein\./i,
+  aliexpress: /(^|\.)aliexpress\./i,
+};
+
 export const CreateImportJobSchema = z.object({
   sourcePlatform: z.enum(["aliexpress", "shein"]),
   sourceUrl: z.string().url().optional(),
@@ -103,6 +108,20 @@ export const CreateImportJobSchema = z.object({
   maxProducts: z.number().int().min(1).max(96).optional(),
 }).refine((d) => d.sourceUrl || d.searchQuery, {
   message: "Either sourceUrl or searchQuery is required",
+}).superRefine((d, ctx) => {
+  // A SHEIN URL submitted under the AliExpress platform (or vice versa) fails
+  // deep inside the worker with a cryptic error — reject it at the door.
+  if (!d.sourceUrl) return;
+  // No URL global in the shared lib target — a host regex is enough here.
+  const host = d.sourceUrl.match(/^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i)?.[1] ?? "";
+  const expected = PLATFORM_HOSTS[d.sourcePlatform];
+  if (host && expected && !expected.test(host)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["sourceUrl"],
+      message: `URL host "${host}" does not match platform "${d.sourcePlatform}"`,
+    });
+  }
 });
 
 // ── Admin: Pricing Config ─────────────────────────────────────────────────────

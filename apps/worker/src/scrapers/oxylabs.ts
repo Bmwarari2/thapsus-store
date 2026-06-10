@@ -118,16 +118,44 @@ export async function fetchAliExpressProduct(url: string): Promise<unknown> {
 export async function fetchAliExpressSearch(query: string): Promise<unknown[]> {
   // aliexpress_search requires query, not url
   const data = await oxyRequest({ source: "aliexpress_search", query, parse: true });
-  const content = data.results[0]?.content as { products?: unknown[] } | null;
-  return content?.products ?? [];
+  const content = data.results[0]?.content as
+    | { products?: unknown[]; results?: unknown[]; items?: unknown[] }
+    | null;
+  const products = content?.products ?? content?.results ?? content?.items ?? [];
+  if (!products.length && content) {
+    // Payload shape drifted — log the keys so the next failure is diagnosable.
+    console.warn(
+      `[oxylabs] aliexpress_search returned no products; content keys: ${Object.keys(content).join(", ")}`,
+    );
+  }
+  return products;
 }
 
 // ── Shein (universal renderer) ────────────────────────────────────────────────
 
+/**
+ * Canonicalize SHEIN product URLs: force the www desktop host (mobile pages
+ * ship different markup) and drop tracking query params, which make renders
+ * flakier and bloat the URL.
+ */
+export function canonicalSheinUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    if (/(^|\.)shein\./i.test(u.hostname)) {
+      u.hostname = "www.shein.co.uk";
+      u.search = "";
+      u.hash = "";
+    }
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
 export async function fetchSheinProduct(url: string): Promise<string> {
   const data = await oxyRequest({
     source: "universal",
-    url,
+    url: canonicalSheinUrl(url),
     render: "html",
     parse: false,
   });
