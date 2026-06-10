@@ -257,6 +257,18 @@ export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProdu
       );
       return built;
     }
+    // gbRawData present but unusable — say why so failures are diagnosable.
+    const detail = deepFind(gb, (n) =>
+      typeof n.goods_name === "string" && n.goods_id != null && "goods_sn" in n);
+    console.warn(
+      `[shein] gbRawData found but unusable (detail node: ${!!detail}, ` +
+        `name: ${detail ? JSON.stringify(String(detail.goods_name).slice(0, 30)) : "n/a"}) — likely no resolvable price`,
+    );
+  } else {
+    console.warn(
+      `[shein] no gbRawData in page (html ${html.length} bytes, ` +
+        `marker present: ${html.includes("gbRawData")}, title: ${JSON.stringify($("title").text().slice(0, 60))})`,
+    );
   }
 
   // Fallback: meta tags only (name + single image, no variants).

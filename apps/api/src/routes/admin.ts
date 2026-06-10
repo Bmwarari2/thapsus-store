@@ -215,7 +215,11 @@ r.post("/import-jobs", async (req, res) => {
   // Push to BullMQ worker queue
   try {
     const { getImportQueue } = await import("../queue.js");
-    await getImportQueue().add("import-product", { jobId: job.id }, { jobId: job.id });
+    await getImportQueue().add(
+      "import-product",
+      { jobId: job.id },
+      { jobId: job.id, removeOnComplete: true, removeOnFail: true },
+    );
   } catch {
     // Queue unreachable — the row stays 'queued' and the worker's stranded-job
     // sweep enqueues it within ~10 minutes.

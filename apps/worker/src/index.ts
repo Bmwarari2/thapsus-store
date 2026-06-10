@@ -138,15 +138,20 @@ async function maybeScheduleWeeklyScrape(): Promise<void> {
   );
 
   if (job) {
-    await scheduleQueue.add("import-product", { jobId: job.id }, { jobId: job.id });
+    await scheduleQueue.add(
+      "import-product",
+      { jobId: job.id },
+      { jobId: job.id, removeOnComplete: true, removeOnFail: true },
+    );
     console.log(`[worker] weekly scrape scheduled: "${query}" (job ${job.id})`);
   }
 }
 
 // ── Stranded-job sweep ────────────────────────────────────────────────────────
-// Re-enqueues import_jobs rows that are 'queued' in the DB but unknown to
-// BullMQ (API enqueue failure, Redis flush, …). jobId = row id keeps this
-// idempotent: adding an already-known job is a no-op.
+// Reconciles import_jobs rows stuck in 'queued' with BullMQ. If BullMQ already
+// knows the jobId we resolve by its state instead of blindly re-adding (an add
+// with an existing jobId is a silent no-op, which would loop forever); only
+// genuinely unknown jobs are enqueued.
 
 async function sweepStrandedJobs(): Promise<void> {
   try {
@@ -156,10 +161,36 @@ async function sweepStrandedJobs(): Promise<void> {
        ORDER BY created_at
        LIMIT 50`,
     );
+
+    let enqueued = 0;
     for (const row of rows) {
-      await scheduleQueue.add("import-product", { jobId: row.id }, { jobId: row.id });
+      const existing = await scheduleQueue.getJob(row.id);
+      if (existing) {
+        const state = await existing.getState();
+        if (state === "completed" || state === "failed") {
+          // BullMQ ran it but the DB row never left 'queued' (e.g. crash
+          // between processing and the status update). Close it out and free
+          // the jobId for any future manual retry.
+          await db.query(
+            `UPDATE import_jobs SET status = 'failed', finished_at = now(),
+               error_message = COALESCE(error_message, $2)
+             WHERE id = $1 AND status = 'queued'`,
+            [row.id, `reconciled by sweep: BullMQ job state was '${state}'`],
+          );
+          await existing.remove().catch(() => null);
+          console.warn(`[worker] sweep closed stranded job ${row.id} (BullMQ state: ${state})`);
+        }
+        // waiting/active/delayed → it's in flight, leave it alone
+        continue;
+      }
+      await scheduleQueue.add(
+        "import-product",
+        { jobId: row.id },
+        { jobId: row.id, removeOnComplete: true, removeOnFail: true },
+      );
+      enqueued++;
     }
-    if (rows.length) console.log(`[worker] sweep re-enqueued ${rows.length} stranded job(s)`);
+    if (enqueued) console.log(`[worker] sweep re-enqueued ${enqueued} stranded job(s)`);
   } catch (err) {
     console.error("[worker] stranded-job sweep failed:", err);
   }
