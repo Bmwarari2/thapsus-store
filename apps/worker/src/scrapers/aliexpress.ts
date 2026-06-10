@@ -74,6 +74,53 @@ function usdCents(price?: number | string): number {
   return Math.round(n * 100);
 }
 
+// AliExpress thumbnails append a size suffix AFTER the real extension
+// (…/abc.jpg_220x220q75.jpg). Strip it to get the full-size original.
+function upsizeAliImage(url: string): string {
+  return url.replace(/(\.(?:jpe?g|png|webp))_\d+x\d+[^/]*$/i, "$1");
+}
+
+function looksLikeProductImage(url: string): boolean {
+  if (!/^(https?:)?\/\//i.test(url)) return false;
+  if (!/alicdn\.com|aliexpress-media|\.(jpe?g|png|webp)(_|$|\?)/i.test(url)) return false;
+  // Exclude obvious chrome: icons, sprites, flags, tiny assets
+  return !/icon|sprite|logo|flag|avatar|\.gif/i.test(url);
+}
+
+/**
+ * Named image fields across payload versions, then a bounded deep scan as a
+ * last resort — the parsed schema has drifted before and an imageless catalog
+ * is worse than a heuristic.
+ */
+function extractImages(c: Record<string, unknown>): string[] {
+  const named = [c.images, c.image_urls, c.gallery, c.main_image, c.image]
+    .flatMap((v) => (Array.isArray(v) ? v : typeof v === "string" ? [v] : []))
+    .filter((v): v is string => typeof v === "string");
+  const candidates = named.length ? named : deepScanImages(c);
+  const out: string[] = [];
+  for (const raw of candidates) {
+    const url = upsizeAliImage(raw.startsWith("//") ? `https:${raw}` : raw);
+    if (looksLikeProductImage(url) && !out.includes(url)) out.push(url);
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+function deepScanImages(root: unknown, maxDepth = 8): string[] {
+  const found: string[] = [];
+  const stack: Array<[unknown, number]> = [[root, 0]];
+  while (stack.length && found.length < 40) {
+    const [node, d] = stack.pop()!;
+    if (d > maxDepth) continue;
+    if (typeof node === "string") {
+      if (looksLikeProductImage(node)) found.push(node);
+    } else if (node && typeof node === "object") {
+      for (const v of Object.values(node as Record<string, unknown>)) stack.push([v, d + 1]);
+    }
+  }
+  return found;
+}
+
 const MAX_VARIANTS = 60;
 
 /** Map of value-id → { propName, valueName, image } across all property axes. */
@@ -168,12 +215,22 @@ export function parseAliExpressProduct(content: unknown, sourceUrl: string): Scr
   if (!name) return null;
 
   const price = c.sale_price ?? c.price ?? c.original_price ?? 0;
-  const images: string[] = (c.images ?? []).filter(Boolean);
+  const images = extractImages(c as Record<string, unknown>);
 
   const skus = c.skus ?? c.sku_list ?? c.variations ?? [];
   const props = c.sku_props ?? [];
   let variants = variantsFromSkus(skus, props);
   if (!variants.length) variants = variantsFromProps(props);
+
+  // Payload-shape diagnostics: when extraction comes up empty, log the keys
+  // (and a small sample) so the real schema shows up in the worker logs.
+  if (!images.length || !variants.length) {
+    const keys = Object.keys(c as Record<string, unknown>).join(", ");
+    console.warn(
+      `[aliexpress] sparse parse (${images.length} images, ${variants.length} variants) — ` +
+        `content keys: [${keys}]; sample: ${JSON.stringify(c).slice(0, 600)}`,
+    );
+  }
 
   const specs = c.specifications ?? [];
   const tags = specs

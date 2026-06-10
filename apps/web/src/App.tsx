@@ -3,6 +3,7 @@ import { Layout } from './components/layout/Layout';
 import { HomePage } from './pages/home/HomePage';
 import { ProductDetailPage } from './pages/products/ProductDetailPage';
 import { BrowsePage } from './pages/products/BrowsePage';
+import { CategoriesPage } from './pages/products/CategoriesPage';
 import { CheckoutPage } from './pages/checkout/CheckoutPage';
 import { OrderConfirmationPage } from './pages/checkout/OrderConfirmationPage';
 import { CartPage } from './pages/cart/CartPage';
@@ -25,6 +26,7 @@ export default function App() {
             <Route path="/" element={<HomePage />} />
             <Route path="/products" element={<BrowsePage />} />
             <Route path="/products/:slug" element={<ProductDetailPage />} />
+            <Route path="/categories" element={<CategoriesPage />} />
             <Route path="/cart" element={<CartPage />} />
             <Route path="/checkout" element={<CheckoutPage />} />
             <Route path="/orders/confirmation/:id" element={<OrderConfirmationPage />} />

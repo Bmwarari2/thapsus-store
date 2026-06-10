@@ -196,6 +196,41 @@ async function sweepStrandedJobs(): Promise<void> {
   }
 }
 
+// ── Hotlink repair ────────────────────────────────────────────────────────────
+// Products imported before variant-image uploads still have swatches pointing
+// at source CDNs (which block hotlinking). Enqueue a bounded batch of
+// refresh-product jobs per boot until none remain; refreshes re-upload every
+// variant image to R2.
+
+async function repairHotlinkedImages(): Promise<void> {
+  const cdnBase = process.env.R2_PUBLIC_URL;
+  if (!cdnBase) return;
+  try {
+    const { rows } = await db.query(
+      `SELECT DISTINCT p.id
+       FROM products p
+       JOIN product_variants v ON v.product_id = p.id AND v.is_active
+       WHERE p.is_active
+         AND p.source_url IS NOT NULL
+         AND p.source_platform IN ('shein', 'aliexpress', 'amazon')
+         AND v.image_url IS NOT NULL
+         AND v.image_url NOT LIKE $1
+       LIMIT 20`,
+      [`${cdnBase}%`],
+    );
+    for (const row of rows) {
+      await scheduleQueue.add(
+        "refresh-product",
+        { productId: row.id },
+        { jobId: `refresh-${row.id}`, removeOnComplete: true, removeOnFail: true },
+      );
+    }
+    if (rows.length) console.log(`[worker] queued ${rows.length} product(s) for hotlinked-image repair`);
+  } catch (err) {
+    console.error("[worker] hotlink repair sweep failed:", err);
+  }
+}
+
 // ── Health server ─────────────────────────────────────────────────────────────
 // The worker is not an HTTP service, but Railway's deploy healthcheck probes
 // /healthz. Expose a minimal endpoint so the deployment is marked healthy.
@@ -233,6 +268,7 @@ async function start(): Promise<void> {
   }
 
   await sweepStrandedJobs();
+  await repairHotlinkedImages();
   sweepTimer = setInterval(sweepStrandedJobs, 10 * 60 * 1000);
 
   console.log("[worker] listening for jobs on queue: imports");

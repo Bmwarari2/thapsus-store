@@ -131,6 +131,34 @@ export async function fetchAliExpressSearch(query: string): Promise<unknown[]> {
   return products;
 }
 
+// ── Amazon (dedicated parsed sources, UK storefront → GBP) ───────────────────
+
+/** Extract the ASIN from any Amazon product URL form (/dp/, /gp/product/, /product/). */
+export function extractAsin(url: string): string | null {
+  return url.match(/\/(?:dp|gp\/product|product)\/([A-Z0-9]{10})(?:[/?]|$)/i)?.[1]?.toUpperCase() ?? null;
+}
+
+export async function fetchAmazonProduct(url: string): Promise<unknown> {
+  const asin = extractAsin(url);
+  if (!asin) throw new Error(`Cannot extract ASIN from Amazon URL: ${url}`);
+  const data = await oxyRequest({ source: "amazon_product", query: asin, domain: "co.uk", parse: true });
+  return data.results[0]?.content ?? null;
+}
+
+export async function fetchAmazonSearch(query: string): Promise<unknown[]> {
+  const data = await oxyRequest({ source: "amazon_search", query, domain: "co.uk", parse: true });
+  const content = data.results[0]?.content as
+    | { results?: { organic?: unknown[]; paid?: unknown[] } }
+    | null;
+  const organic = content?.results?.organic ?? [];
+  if (!organic.length && content) {
+    console.warn(
+      `[oxylabs] amazon_search returned no organic results; content keys: ${Object.keys(content).join(", ")}`,
+    );
+  }
+  return organic;
+}
+
 // ── Shein (universal renderer) ────────────────────────────────────────────────
 
 /**

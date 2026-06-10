@@ -18,16 +18,19 @@ import type { Job } from "bullmq";
 import type { ScrapedProduct, ScrapedVariant } from "@thapsus/shared";
 import { uniqueSlug, computeItemPriceKesCents, parsePricingConfigV2 } from "@thapsus/shared";
 import { db } from "../db.js";
-import { uploadProductImages } from "../images.js";
+import { uploadProductImagesAligned } from "../images.js";
 import {
   fetchAliExpressProduct,
   fetchAliExpressSearch,
+  fetchAmazonProduct,
+  fetchAmazonSearch,
   fetchSheinProduct,
   fetchSheinSearch,
   setScrapeJobContext,
   BudgetExceededError,
 } from "../scrapers/oxylabs.js";
 import { parseAliExpressProduct, parseAliExpressSearchItem } from "../scrapers/aliexpress.js";
+import { parseAmazonProduct, parseAmazonSearchItem } from "../scrapers/amazon.js";
 import { parseSheinProduct, parseSheinSearchHtml, sheinColorTargets, sheinSkcImages } from "../scrapers/shein.js";
 
 export interface ImportJobPayload {
@@ -112,15 +115,6 @@ async function syncVariants(
     `UPDATE products SET has_variants = $2 WHERE id = $1`,
     [productId, seenKeys.length > 0],
   );
-}
-
-/** Map each scraped source image URL to its uploaded R2/CDN URL (by position). */
-function buildImageMap(sourceUrls: string[], cdnUrls: string[]): Map<string, string> {
-  const map = new Map<string, string>();
-  for (let i = 0; i < sourceUrls.length; i++) {
-    if (cdnUrls[i]) map.set(sourceUrls[i], cdnUrls[i]);
-  }
-  return map;
 }
 
 const MAX_SHEIN_COLOR_FETCHES = 12;
@@ -211,6 +205,30 @@ async function scrapeProducts(
         } catch (err) {
           if (err instanceof BudgetExceededError) throw err;
           console.warn(`[import] failed to fetch aliexpress product ${partial.sourceUrl}:`, err);
+        }
+      }
+    }
+  } else if (platform === "amazon") {
+    if (sourceUrl) {
+      const content = await fetchAmazonProduct(sourceUrl);
+      const product = parseAmazonProduct(content, sourceUrl);
+      if (product) results.push(product);
+      else console.warn(`[import] amazon product parse returned null for ${sourceUrl}`);
+    } else if (searchQuery) {
+      const items = await fetchAmazonSearch(searchQuery);
+      console.log(`[import] amazon search "${searchQuery}" returned ${items.length} raw items (cap ${maxProducts})`);
+      for (const item of items) {
+        if (results.length >= maxProducts) break;
+        const partial = parseAmazonSearchItem(item);
+        if (!partial?.sourceUrl) continue;
+        try {
+          const content = await fetchAmazonProduct(partial.sourceUrl);
+          const product = parseAmazonProduct(content, partial.sourceUrl);
+          if (product) results.push(product);
+          else console.warn(`[import] amazon product parse returned null for ${partial.sourceUrl}`);
+        } catch (err) {
+          if (err instanceof BudgetExceededError) throw err;
+          console.warn(`[import] failed to fetch amazon product ${partial.sourceUrl}:`, err);
         }
       }
     }
@@ -369,18 +387,27 @@ async function upsertProduct(
   const rowMarkup = Number(row.markup_pct);
   const basePrice = Number(row.sell_price_kes_cents);
 
-  // Upload images under the REAL product id (no temp keys), then swap the URLs in.
-  const cdnImages = await uploadProductImages(productId, scraped.images);
-  await db.query(`UPDATE products SET images = $2 WHERE id = $1`, [productId, cdnImages]);
+  // Upload the gallery PLUS every variant swatch under the real product id —
+  // variant images outside the gallery were previously left hotlinking the
+  // source CDN, which SHEIN blocks (the "missing colour images" bug).
+  const variantImages = scraped.variants
+    .map((v) => v.imageUrl)
+    .filter((u): u is string => !!u);
+  const uploadList = [...new Set([...scraped.images, ...variantImages])];
+  const aligned = await uploadProductImagesAligned(productId, uploadList);
 
-  await syncVariants(
-    productId,
-    scraped,
-    basePrice,
-    config,
-    rowMarkup,
-    buildImageMap(scraped.images, cdnImages),
-  );
+  const imageMap = new Map<string, string>();
+  for (let i = 0; i < uploadList.length; i++) {
+    if (aligned[i]) imageMap.set(uploadList[i], aligned[i]!);
+  }
+
+  let gallery = scraped.images
+    .map((u) => imageMap.get(u))
+    .filter((u): u is string => !!u);
+  if (!gallery.length && scraped.images.length) gallery = scraped.images; // every upload failed — stay usable
+  await db.query(`UPDATE products SET images = $2 WHERE id = $1`, [productId, gallery]);
+
+  await syncVariants(productId, scraped, basePrice, config, rowMarkup, imageMap);
 
   return { id: productId, isNew };
 }
@@ -469,7 +496,7 @@ export async function processRefreshProduct(job: Job<RefreshProductPayload>): Pr
     [productId],
   );
   const product = rows[0];
-  if (!product?.source_url || !["aliexpress", "shein"].includes(product.source_platform)) return;
+  if (!product?.source_url || !["aliexpress", "shein", "amazon"].includes(product.source_platform)) return;
 
   const config = await loadPricingConfig();
   const scraped = await scrapeProducts(product.source_platform, product.source_url, null, 1);

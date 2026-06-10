@@ -85,7 +85,7 @@ export const CreateProductSchema = z.object({
   markupPct: z.number().min(0).max(500).optional(),
   estimatedDaysMin: z.number().int().min(1).default(7),
   estimatedDaysMax: z.number().int().min(1).default(14),
-  sourcePlatform: z.enum(["aliexpress", "shein", "manual"]).default("manual"),
+  sourcePlatform: z.enum(["aliexpress", "shein", "amazon", "manual"]).default("manual"),
   sourceUrl: z.string().url().optional(),
 });
 
@@ -98,10 +98,11 @@ export const UpdateProductSchema = CreateProductSchema.partial();
 const PLATFORM_HOSTS: Record<string, RegExp> = {
   shein: /(^|\.)shein\./i,
   aliexpress: /(^|\.)aliexpress\./i,
+  amazon: /(^|\.)amazon\./i,
 };
 
 export const CreateImportJobSchema = z.object({
-  sourcePlatform: z.enum(["aliexpress", "shein"]),
+  sourcePlatform: z.enum(["aliexpress", "shein", "amazon"]),
   sourceUrl: z.string().url().optional(),
   searchQuery: z.string().optional(),
   categoryId: z.string().uuid().optional(),

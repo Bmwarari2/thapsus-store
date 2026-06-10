@@ -12,6 +12,7 @@ import {
 const PLATFORMS = [
   { value: 'aliexpress', label: 'AliExpress' },
   { value: 'shein',      label: 'Shein' },
+  { value: 'amazon',     label: 'Amazon UK' },
 ] as const;
 
 const STATUS_BADGE: Record<ImportJob['status'], { label: string; className: string; icon: React.ReactNode }> = {
@@ -35,7 +36,7 @@ function duration(start: string | null, end: string | null) {
 
 export const ImportsPage = () => {
   const queryClient = useQueryClient();
-  const [platform, setPlatform] = useState<'aliexpress' | 'shein'>('aliexpress');
+  const [platform, setPlatform] = useState<'aliexpress' | 'shein' | 'amazon'>('aliexpress');
   const [mode, setMode] = useState<'search' | 'url'>('search');
   const [searchQuery, setSearchQuery] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
@@ -94,7 +95,7 @@ export const ImportsPage = () => {
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-2xl font-bold">Product Imports</h1>
-          <p className="text-textSecondary text-sm mt-1">Scrape products from AliExpress or Shein into the catalogue</p>
+          <p className="text-textSecondary text-sm mt-1">Scrape products from AliExpress, Shein, or Amazon UK into the catalogue</p>
         </div>
         {activeJobs.length > 0 && (
           <div className="flex items-center gap-2 text-sm text-blue-600 bg-blue-50 px-4 py-2 rounded-full font-medium">

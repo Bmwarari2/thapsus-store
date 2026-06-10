@@ -13,7 +13,7 @@ export const BottomNav = () => {
 
   const tabs = [
     { icon: Home, label: 'Home', path: '/' },
-    { icon: Grid, label: 'Categories', path: '/products' },
+    { icon: Grid, label: 'Categories', path: '/categories' },
     { icon: Search, label: 'Search', path: '/search' },
     { icon: ShoppingCart, label: 'Cart', path: '/cart', badge: cartItemCount },
     { icon: User, label: 'Account', path: '/account' },

@@ -29,6 +29,8 @@ export interface Category {
   icon: string | null;
   imageUrl: string | null;
   sortOrder: number;
+  productCount: number;
+  previewImage: string | null;
 }
 
 // Mirrors the API's PublicProduct — no cost/markup/source fields exist on the
@@ -243,11 +245,44 @@ export const apiGetPaymentStatus = (orderId: string) =>
   api.get(`/orders/${orderId}/payment-status`)
     .then(unwrap<{ status: 'paid' | 'pending' | 'cancelled'; paidAt: string | null; paymentRef: string | null }>);
 
+// ── Admin: Purchasing (fulfilment report) ─────────────────────────────────────
+
+export interface PurchasingItem {
+  itemId: string;
+  name: string;
+  image: string | null;
+  attrs: Record<string, string> | null;
+  qty: number;
+  unitPriceCents: number;
+  purchasedAt: string | null;
+  sourcePlatform: string | null;
+  sourceUrl: string | null;
+  sourcePriceCents: number;
+  sourceCurrency: string;
+}
+
+export interface PurchasingOrder {
+  orderId: string;
+  orderNumber: string;
+  paidAt: string;
+  orderStatus: string;
+  customerName: string | null;
+  items: PurchasingItem[];
+}
+
+export const apiGetPurchasing = (includeDone = false) =>
+  api.get('/admin/purchasing', { params: { include_done: includeDone } })
+    .then(unwrap<PurchasingOrder[]>);
+
+export const apiMarkPurchased = (itemId: string, purchased: boolean) =>
+  api.patch(`/admin/purchasing/items/${itemId}`, { purchased })
+    .then(unwrap<{ itemId: string; purchased: boolean; orderAdvanced: boolean }>);
+
 // ── Admin: Import Jobs ────────────────────────────────────────────────────────
 
 export interface ImportJob {
   id: string;
-  source_platform: 'aliexpress' | 'shein';
+  source_platform: 'aliexpress' | 'shein' | 'amazon';
   source_url: string | null;
   search_query: string | null;
   category_id: string | null;
@@ -265,7 +300,7 @@ export const apiGetImportJobs = () =>
   api.get('/admin/import-jobs').then(unwrap<ImportJob[]>);
 
 export const apiCreateImportJob = (body: {
-  sourcePlatform: 'aliexpress' | 'shein';
+  sourcePlatform: 'aliexpress' | 'shein' | 'amazon';
   searchQuery?: string;
   sourceUrl?: string;
   categoryId?: string;
