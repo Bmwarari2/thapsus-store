@@ -12,6 +12,7 @@ import { config } from "dotenv";
 config({ path: resolve(dirname(fileURLToPath(import.meta.url)), "../../.env.local") });
 
 import { authOptional, idempotency, envelope } from "./middleware.js";
+import { getCategories } from "./repos/products.js";
 import authRoutes     from "./routes/auth.js";
 import productRoutes  from "./routes/products.js";
 import searchRoutes   from "./routes/search.js";
@@ -26,7 +27,24 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 
-app.use(helmet({ contentSecurityPolicy: false }));
+// SPA + API share one origin, so a real CSP is feasible. Product images are
+// served from the R2 CDN domain.
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"], // Tailwind preflight + inline style attrs
+      // https: until every catalog image is re-hosted on the R2 CDN — some
+      // legacy rows still hotlink source-platform URLs.
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'"],
+      fontSrc: ["'self'", "data:"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"],
+    },
+  },
+}));
 app.set("trust proxy", 1); // Required when behind Railway / Cloudflare proxy
 
 const generalLimiter = rateLimit({
@@ -54,8 +72,21 @@ const paymentLimiter = rateLimit({
 });
 
 app.use("/api/v1", generalLimiter);
+
+// CORS: explicit allowlist only. In production a missing WEB_BASE_URL must be
+// a boot failure, never "reflect any origin with credentials".
+const corsOrigins = (process.env.WEB_BASE_URL ?? "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+if (!corsOrigins.length) {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("WEB_BASE_URL must be set in production (comma-separated CORS allowlist)");
+  }
+  corsOrigins.push("http://localhost:5173");
+}
 app.use(cors({
-  origin: process.env.WEB_BASE_URL ?? true,
+  origin: corsOrigins,
   credentials: true,
   allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key"],
 }));
@@ -80,7 +111,6 @@ v1.use("/admin",                     adminRoutes);
 v1.use("/payments",                  paymentRoutes);
 
 v1.get("/categories", async (_req, res) => {
-  const { getCategories } = await import("./repos/products.js");
   res.json(envelope(await getCategories()));
 });
 

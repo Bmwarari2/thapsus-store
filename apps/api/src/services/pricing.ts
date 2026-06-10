@@ -4,64 +4,43 @@
  */
 
 import { db } from "../db.js";
-import { computeProductPrice, parsePricingConfig, type PriceBreakdown, type SourceCurrency } from "@thapsus/shared";
+import {
+  computeItemPriceKesCents,
+  parsePricingConfigV2,
+  REPRICE_ALL_PRODUCTS_SQL,
+  type PricingConfigV2,
+  type SourceCurrency,
+} from "@thapsus/shared";
 
-let cachedConfig: ReturnType<typeof parsePricingConfig> | null = null;
+let cachedConfig: PricingConfigV2 | null = null;
 let cacheExpiry = 0;
 
-export async function loadPricingConfig() {
+export async function loadPricingConfig(): Promise<PricingConfigV2> {
   if (cachedConfig && Date.now() < cacheExpiry) return cachedConfig;
   const { rows } = await db.query(`SELECT key, value FROM pricing_config`);
-  cachedConfig = parsePricingConfig(rows);
+  cachedConfig = parsePricingConfigV2(rows);
   cacheExpiry = Date.now() + 5 * 60 * 1000; // 5 min
   return cachedConfig;
 }
 
-export function invalidatePricingCache() {
+export function invalidatePricingCache(): void {
   cachedConfig = null;
   cacheExpiry = 0;
 }
 
-export async function priceProduct(
+/** Item price for one product under the live config. No weight, no freight. */
+export async function priceItem(
   sourcePriceCents: number,
-  weightGrams: number,
-  markupPctOverride?: number,
   sourceCurrency: SourceCurrency = "USD",
-): Promise<PriceBreakdown> {
+  markupPctOverride?: number,
+): Promise<number> {
   const config = await loadPricingConfig();
-  const effectiveConfig = markupPctOverride != null
-    ? { ...config, markupPct: markupPctOverride }
-    : config;
-  return computeProductPrice(sourcePriceCents, weightGrams, effectiveConfig, sourceCurrency);
+  return computeItemPriceKesCents(sourcePriceCents, sourceCurrency, config, markupPctOverride);
 }
 
+/** Set-based reprice of every active product. Returns rows changed. */
 export async function repriceAllProducts(): Promise<number> {
-  const config = await loadPricingConfig();
-  const { rows: products } = await db.query(
-    `SELECT id, source_price_usd_cents, source_currency, markup_pct FROM products WHERE is_active = true`,
-  );
-
-  let updated = 0;
-  for (const p of products) {
-    const effectiveConfig = { ...config, markupPct: Number(p.markup_pct) };
-    // Use a default weight of 500g for repricing; real weight set during import
-    const breakdown = computeProductPrice(
-      Number(p.source_price_usd_cents),
-      500,
-      effectiveConfig,
-      (p.source_currency as SourceCurrency) ?? "USD",
-    );
-    await db.query(
-      `UPDATE products
-       SET shipping_fee_kes_cents = $2,
-           tax_kes_cents          = $3,
-           sell_price_kes_cents   = $4,
-           updated_at             = now()
-       WHERE id = $1`,
-      [p.id, breakdown.shippingKes * 100, breakdown.vatKes * 100, breakdown.totalKesCents],
-    );
-    updated++;
-  }
+  const { rowCount } = await db.query(REPRICE_ALL_PRODUCTS_SQL);
   invalidatePricingCache();
-  return updated;
+  return rowCount ?? 0;
 }

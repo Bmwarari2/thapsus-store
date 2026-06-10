@@ -1,31 +1,212 @@
+/**
+ * Checkout: quote → order → pay.
+ *
+ *   POST /orders/quote  — server-prices the cart: live item prices, delivery
+ *                         from real cart weight, promotion validated (not
+ *                         consumed). Persists an order_quotes row (30-min TTL).
+ *   POST /orders        — replays an unexpired quote into an order. Idempotent
+ *                         via the Idempotency-Key header and the quote linkage.
+ *                         Does NOT clear the cart or burn the promotion — that
+ *                         happens when payment confirms.
+ *   GET  /orders/:id/payment-status — client polling during the STK push.
+ */
+
 import { Router } from "express";
-import { CreateOrderSchema } from "@thapsus/shared";
+import { CreateOrderSchema, CreateQuoteSchema, computeCartCharges, estimatedDeliveryRange } from "@thapsus/shared";
 import { envelope, errorEnvelope, requireAuth } from "../middleware.js";
 import * as orders from "../repos/orders.js";
-import * as cartRepo from "../repos/cart.js";
 import { db } from "../db.js";
-import { priceProduct } from "../services/pricing.js";
-import { sendOrderConfirmed } from "../services/email.js";
-import { estimatedDeliveryRange } from "@thapsus/shared";
+import { loadPricingConfig } from "../services/pricing.js";
+import { deliveryFeeForWeight } from "../services/shipping.js";
 
 const r = Router();
 
 r.use(requireAuth);
+
+const QUOTE_TTL_MINUTES = 30;
+const MAX_DRIFT = 0.02; // order rejected if any line price moved >2% since the quote
+
+interface QuoteLine {
+  productId: string;
+  variantId: string | null;
+  qty: number;
+  unitPriceCents: number;
+  weightGrams: number;
+  nameSnap: string;
+  imageSnap: string | null;
+  attrsSnap: Record<string, string> | null;
+}
+
+r.post("/quote", async (req, res) => {
+  const parsed = CreateQuoteSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json(errorEnvelope("validation", "Invalid input", parsed.error.flatten()));
+  }
+
+  // Cart lines with live product price, weight, and stock.
+  const { rows } = await db.query(
+    `SELECT ci.product_id, ci.variant_id, ci.qty,
+            p.name, p.images[1] AS image, p.weight_grams, p.stock_status,
+            p.is_active, p.sell_price_kes_cents,
+            pv.attributes AS variant_attributes, pv.price_delta_kes_cents,
+            pv.stock_qty AS variant_stock, pv.is_active AS variant_active
+     FROM cart_items ci
+     JOIN carts c        ON c.id = ci.cart_id AND c.user_id = $1
+     JOIN products p     ON p.id = ci.product_id
+     LEFT JOIN product_variants pv ON pv.id = ci.variant_id
+     ORDER BY ci.added_at`,
+    [req.user!.id],
+  );
+  if (!rows.length) {
+    return res.status(400).json(errorEnvelope("empty_cart", "Your cart is empty"));
+  }
+
+  const warnings: string[] = [];
+  const lines: QuoteLine[] = [];
+
+  for (const row of rows) {
+    const unavailable =
+      !row.is_active ||
+      row.stock_status === "out_of_stock" ||
+      (row.variant_id && (!row.variant_active || Number(row.variant_stock) <= 0));
+    if (unavailable) {
+      warnings.push(`${row.name} is currently unavailable and was left out of this order.`);
+      continue;
+    }
+    lines.push({
+      productId: row.product_id,
+      variantId: row.variant_id ?? null,
+      qty: Number(row.qty),
+      unitPriceCents: Number(row.sell_price_kes_cents) + Number(row.price_delta_kes_cents ?? 0),
+      weightGrams: Number(row.weight_grams),
+      nameSnap: row.name,
+      imageSnap: row.image ?? null,
+      attrsSnap: row.variant_attributes ?? null,
+    });
+  }
+
+  if (!lines.length) {
+    return res.status(400).json(errorEnvelope("nothing_available", "No items in your cart are currently available", { warnings }));
+  }
+
+  const itemsCents = lines.reduce((s, l) => s + l.unitPriceCents * l.qty, 0);
+  const totalWeightGrams = lines.reduce((s, l) => s + l.weightGrams * l.qty, 0);
+  const delivery = await deliveryFeeForWeight(totalWeightGrams);
+
+  // Promotion: validated here, consumed only when payment confirms.
+  let discountCents = 0;
+  let promotionId: string | null = null;
+  if (parsed.data.promotionCode) {
+    const { rows: promoRows } = await db.query(
+      `SELECT id, type, value, min_order_cents FROM promotions
+       WHERE upper(code) = upper($1) AND is_active = true
+         AND valid_from <= now() AND valid_to >= now()
+         AND (max_uses IS NULL OR use_count < max_uses)`,
+      [parsed.data.promotionCode],
+    );
+    const promo = promoRows[0];
+    if (!promo) {
+      warnings.push("That promo code is invalid or expired.");
+    } else if (itemsCents < Number(promo.min_order_cents)) {
+      warnings.push(`Promo code requires a minimum order of KES ${Math.round(Number(promo.min_order_cents) / 100).toLocaleString()}.`);
+    } else {
+      discountCents = promo.type === "percentage"
+        ? Math.round(itemsCents * Number(promo.value) / 10000)
+        : Math.min(Number(promo.value), itemsCents);
+      promotionId = promo.id;
+    }
+  }
+
+  const cfg = await loadPricingConfig();
+  const charges = computeCartCharges({ itemsCents, deliveryCents: delivery.feeCents, cfg, discountCents });
+
+  const expiresAt = new Date(Date.now() + QUOTE_TTL_MINUTES * 60 * 1000);
+  const { rows: [quote] } = await db.query(
+    `INSERT INTO order_quotes (
+       user_id, items, items_cents, delivery_cents, duty_cents, vat_cents,
+       discount_cents, total_cents, promotion_id, fx_usd, fx_gbp, expires_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+     RETURNING id, expires_at`,
+    [
+      req.user!.id,
+      JSON.stringify(lines),
+      itemsCents,
+      delivery.feeCents,
+      charges.dutyCents,
+      charges.vatCents,
+      discountCents,
+      charges.totalCents,
+      promotionId,
+      cfg.usdToKesRate,
+      cfg.gbpToKesRate,
+    ],
+  );
+
+  return res.status(201).json(envelope({
+    quoteId: quote.id,
+    expiresAt: quote.expires_at,
+    lines,
+    itemsCents,
+    deliveryCents: delivery.feeCents,
+    dutyCents: charges.dutyCents,
+    vatCents: charges.vatCents,
+    discountCents,
+    totalCents: charges.totalCents,
+    totalWeightGrams,
+    estimatedDelivery: estimatedDeliveryRange(new Date(), delivery.estDaysMin, delivery.estDaysMax),
+    estDaysMin: delivery.estDaysMin,
+    estDaysMax: delivery.estDaysMax,
+    warnings,
+  }));
+});
 
 r.post("/", async (req, res) => {
   const parsed = CreateOrderSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json(errorEnvelope("validation", "Invalid input", parsed.error.flatten()));
   }
-  const { deliveryAddressId, paymentMethod, promotionCode, notes } = parsed.data;
+  const { quoteId, deliveryAddressId, paymentMethod, notes } = parsed.data;
 
-  // Load cart
-  const { cartId, items } = await cartRepo.getCartWithItems(req.user!.id);
-  if (!items.length) {
-    return res.status(400).json(errorEnvelope("empty_cart", "Your cart is empty"));
+  const { rows: quoteRows } = await db.query(
+    `SELECT * FROM order_quotes WHERE id = $1 AND user_id = $2`,
+    [quoteId, req.user!.id],
+  );
+  const quote = quoteRows[0];
+  if (!quote) return res.status(404).json(errorEnvelope("not_found", "Quote not found"));
+
+  // A quote already turned into an order → return that order (safe replay).
+  const existingForQuote = await orders.findByQuoteId(quoteId);
+  if (existingForQuote) return res.status(200).json(envelope({ order: existingForQuote, replayed: true }));
+
+  if (new Date(quote.expires_at).getTime() < Date.now()) {
+    return res.status(409).json(errorEnvelope("quote_expired", "This quote has expired — please review your order again"));
   }
 
-  // Validate delivery address belongs to user
+  const lines = quote.items as QuoteLine[];
+
+  // Re-check price drift: if the catalog moved more than 2% on any line since
+  // the quote, force a re-quote rather than charging a stale price.
+  const { rows: priceRows } = await db.query(
+    `SELECT p.id AS product_id, pv.id AS variant_id,
+            p.sell_price_kes_cents + COALESCE(pv.price_delta_kes_cents, 0) AS current_cents
+     FROM products p
+     LEFT JOIN product_variants pv ON pv.product_id = p.id
+     WHERE p.id = ANY($1::uuid[])`,
+    [lines.map((l) => l.productId)],
+  );
+  for (const line of lines) {
+    const match = priceRows.find(
+      (pr: Record<string, unknown>) =>
+        pr.product_id === line.productId && (pr.variant_id ?? null) === (line.variantId ?? null),
+    ) ?? priceRows.find((pr: Record<string, unknown>) => pr.product_id === line.productId && pr.variant_id == null);
+    if (!match) continue;
+    const current = Number(match.current_cents);
+    if (line.unitPriceCents > 0 && Math.abs(current - line.unitPriceCents) / line.unitPriceCents > MAX_DRIFT) {
+      return res.status(409).json(errorEnvelope("quote_stale", "Prices have changed since this quote — please review your order again"));
+    }
+  }
+
+  // Delivery address must belong to the user.
   const { rows: addrRows } = await db.query(
     `SELECT * FROM delivery_addresses WHERE id = $1 AND user_id = $2`,
     [deliveryAddressId, req.user!.id],
@@ -35,69 +216,12 @@ r.post("/", async (req, res) => {
   }
   const address = addrRows[0];
 
-  // Re-validate prices and check for stale snapshots (warn if >5% drift)
-  const priceWarnings: string[] = [];
-  const orderItems = items.map((item) => {
-    const current = item.currentPriceCents ?? item.priceSnapshotCents;
-    const drift = Math.abs(current - item.priceSnapshotCents) / item.priceSnapshotCents;
-    if (drift > 0.05) {
-      priceWarnings.push(`${item.productName}: price changed from KES ${Math.round(item.priceSnapshotCents / 100)} to KES ${Math.round(current / 100)}`);
-    }
-    return {
-      productId: item.productId,
-      variantId: item.variantId ?? undefined,
-      productNameSnap: item.productName ?? "Product",
-      productImageSnap: item.productImage,
-      variantAttrsSnap: item.variantAttributes ?? undefined,
-      qty: item.qty,
-      unitPriceCents: current, // always use current price at order time
-    };
-  });
-
-  // Calculate totals
-  const subtotalCents = orderItems.reduce((s, i) => s + i.unitPriceCents * i.qty, 0);
-
-  // Shipping: use the highest estimate across items (single shipment)
-  const { rows: shippingRateRows } = await db.query(
-    `SELECT fee_kes_cents FROM shipping_rates WHERE is_active = true AND $1 >= weight_min_g AND $1 <= weight_max_g LIMIT 1`,
-    [500], // default weight; worker will update per-product weight
-  );
-  const shippingCents = Number(shippingRateRows[0]?.fee_kes_cents ?? 80000);
-
-  // Tax is already baked into sell_price_kes_cents, so tax_cents here is 0
-  const taxCents = 0;
-
-  // Promotion
-  let discountCents = 0;
-  let promotionId: string | undefined;
-  if (promotionCode) {
-    const { rows: promoRows } = await db.query(
-      `SELECT id, type, value, min_order_cents FROM promotions
-       WHERE upper(code) = upper($1) AND is_active = true
-         AND valid_from <= now() AND valid_to >= now()
-         AND (max_uses IS NULL OR use_count < max_uses)`,
-      [promotionCode],
-    );
-    if (promoRows.length) {
-      const promo = promoRows[0];
-      if (subtotalCents >= Number(promo.min_order_cents)) {
-        discountCents = promo.type === "percentage"
-          ? Math.round(subtotalCents * Number(promo.value) / 10000)
-          : Number(promo.value);
-        promotionId = promo.id;
-        await db.query(`UPDATE promotions SET use_count = use_count + 1 WHERE id = $1`, [promo.id]);
-      }
-    }
-  }
-
-  const totalCents = subtotalCents + shippingCents + taxCents - discountCents;
-
-  // Estimated delivery
+  const totalWeightGrams = lines.reduce((s, l) => s + l.weightGrams * l.qty, 0);
+  const delivery = await deliveryFeeForWeight(totalWeightGrams);
   const estimatedDeliveryAt = new Date();
-  estimatedDeliveryAt.setDate(estimatedDeliveryAt.getDate() + 10); // median 10 days
-  const deliveryRange = estimatedDeliveryRange(new Date(), 7, 14);
+  estimatedDeliveryAt.setDate(estimatedDeliveryAt.getDate() + delivery.estDaysMax);
 
-  const order = await orders.create({
+  const { order, replayed } = await orders.create({
     userId: req.user!.id,
     deliveryAddressId,
     deliveryAddressSnap: {
@@ -108,30 +232,33 @@ r.post("/", async (req, res) => {
       addressLine: address.address_line,
     },
     estimatedDeliveryAt: estimatedDeliveryAt.toISOString().split("T")[0],
-    subtotalCents,
-    shippingCents,
-    taxCents,
-    discountCents,
-    totalCents,
+    subtotalCents: Number(quote.items_cents),
+    shippingCents: Number(quote.delivery_cents),
+    taxCents: 0, // legacy column; duty/vat have their own lines now
+    dutyCents: Number(quote.duty_cents),
+    vatCents: Number(quote.vat_cents),
+    discountCents: Number(quote.discount_cents),
+    totalCents: Number(quote.total_cents),
     paymentMethod,
-    promotionId,
+    promotionId: quote.promotion_id ?? undefined,
+    quoteId,
+    idempotencyKey: req.idemKey,
     notes,
-    items: orderItems,
+    items: lines.map((l) => ({
+      productId: l.productId,
+      variantId: l.variantId ?? undefined,
+      productNameSnap: l.nameSnap,
+      productImageSnap: l.imageSnap ?? undefined,
+      variantAttrsSnap: l.attrsSnap ?? undefined,
+      qty: l.qty,
+      unitPriceCents: l.unitPriceCents,
+    })),
   });
 
-  // Clear cart
-  await cartRepo.clearCart(req.user!.id);
+  // Cart is cleared and the promotion counted when payment confirms — an
+  // abandoned STK push must not empty the customer's cart.
 
-  // Send confirmation email (fire-and-forget)
-  const { rows: userRows } = await db.query(`SELECT email FROM users WHERE id = $1`, [req.user!.id]);
-  sendOrderConfirmed(userRows[0].email, {
-    orderNumber: order.orderNumber,
-    totalCents: order.totalCents,
-    estimatedDelivery: deliveryRange,
-    items: orderItems.map((i) => ({ name: i.productNameSnap, qty: i.qty, priceCents: i.unitPriceCents })),
-  }).catch((err) => console.error("[orders] confirmation email failed:", err));
-
-  return res.status(201).json(envelope({ order, priceWarnings }));
+  return res.status(replayed ? 200 : 201).json(envelope({ order, replayed }));
 });
 
 r.get("/", async (req, res) => {
@@ -145,6 +272,16 @@ r.get("/:id", async (req, res) => {
   if (!order) return res.status(404).json(errorEnvelope("not_found", "Order not found"));
   const items = await orders.getItems(order.id);
   return res.json(envelope({ order, items }));
+});
+
+r.get("/:id/payment-status", async (req, res) => {
+  const order = await orders.findById(req.params.id, req.user!.id);
+  if (!order) return res.status(404).json(errorEnvelope("not_found", "Order not found"));
+  const status =
+    order.paidAt ? "paid"
+    : order.status === "cancelled" ? "cancelled"
+    : "pending";
+  return res.json(envelope({ status, orderStatus: order.status, paidAt: order.paidAt, paymentRef: order.paymentRef }));
 });
 
 r.post("/:id/cancel", async (req, res) => {

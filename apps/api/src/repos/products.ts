@@ -16,9 +16,10 @@ export interface Product {
   sourcePriceUsdCents: number;
   sourceCurrency: string;
   markupPct: number;
-  shippingFeeKesCents: number;
-  taxKesCents: number;
   sellPriceKesCents: number;
+  compareAtKesCents: number | null;
+  weightGrams: number;
+  weightSource: string;
   hasVariants: boolean;
   stockStatus: string;
   viewCount: number;
@@ -31,6 +32,51 @@ export interface Product {
   estimatedDaysMax: number;
   lastScrapedAt: string | null;
   createdAt: string;
+}
+
+/**
+ * The catalog shape customers see. Deliberately excludes source price, markup,
+ * source URL/id/platform, and weight — the cost basis and supply chain are
+ * admin-only (full Product via /admin routes).
+ */
+export interface PublicProduct {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  images: string[];
+  sellPriceKesCents: number;
+  compareAtKesCents: number | null;
+  hasVariants: boolean;
+  stockStatus: string;
+  rating: number | null;
+  reviewCount: number;
+  estimatedDaysMin: number;
+  estimatedDaysMax: number;
+  isFeatured: boolean;
+  categoryId: string;
+  createdAt: string;
+}
+
+export function toPublicProduct(p: Product): PublicProduct {
+  return {
+    id: p.id,
+    name: p.name,
+    slug: p.slug,
+    description: p.description,
+    images: p.images,
+    sellPriceKesCents: p.sellPriceKesCents,
+    compareAtKesCents: p.compareAtKesCents,
+    hasVariants: p.hasVariants,
+    stockStatus: p.stockStatus,
+    rating: p.rating,
+    reviewCount: p.reviewCount,
+    estimatedDaysMin: p.estimatedDaysMin,
+    estimatedDaysMax: p.estimatedDaysMax,
+    isFeatured: p.isFeatured,
+    categoryId: p.categoryId,
+    createdAt: p.createdAt,
+  };
 }
 
 export interface ProductVariant {
@@ -61,9 +107,10 @@ function mapProduct(row: Record<string, unknown>): Product {
     sourcePriceUsdCents: Number(row.source_price_usd_cents),
     sourceCurrency: (row.source_currency as string) ?? "USD",
     markupPct: Number(row.markup_pct),
-    shippingFeeKesCents: Number(row.shipping_fee_kes_cents),
-    taxKesCents: Number(row.tax_kes_cents),
     sellPriceKesCents: Number(row.sell_price_kes_cents),
+    compareAtKesCents: row.compare_at_kes_cents != null ? Number(row.compare_at_kes_cents) : null,
+    weightGrams: Number(row.weight_grams),
+    weightSource: (row.weight_source as string) ?? "category_default",
     hasVariants: row.has_variants as boolean,
     stockStatus: row.stock_status as string,
     viewCount: Number(row.view_count),
@@ -105,6 +152,7 @@ export interface ListProductsOptions {
   limit?: number;
 }
 
+/** Offset pagination — admin tables only. The customer feed uses feed(). */
 export async function list(opts: ListProductsOptions = {}): Promise<{ products: Product[]; total: number }> {
   const { page = 1, limit = 24, sort = "newest" } = opts;
   const offset = (page - 1) * limit;
@@ -166,6 +214,111 @@ export async function list(opts: ListProductsOptions = {}): Promise<{ products: 
   return { products: rows.map(mapProduct), total: countRows[0].total };
 }
 
+// ── Keyset feed (infinite scroll) ─────────────────────────────────────────────
+
+export type FeedSort = "newest" | "popular" | "price_asc" | "price_desc";
+
+export interface FeedOptions {
+  limit: number;
+  sort: FeedSort;
+  cursor?: string;
+  categorySlug?: string;
+  search?: string;
+  minPriceCents?: number;
+  maxPriceCents?: number;
+}
+
+interface FeedSortSpec {
+  column: string;            // the sort value column
+  direction: "ASC" | "DESC"; // applied to both value and id
+  cast: "string" | "number";
+}
+
+const FEED_SORTS: Record<FeedSort, FeedSortSpec> = {
+  newest:     { column: "p.created_at",           direction: "DESC", cast: "string" },
+  popular:    { column: "p.order_count",          direction: "DESC", cast: "number" },
+  price_asc:  { column: "p.sell_price_kes_cents", direction: "ASC",  cast: "number" },
+  price_desc: { column: "p.sell_price_kes_cents", direction: "DESC", cast: "number" },
+};
+
+function encodeCursor(value: unknown, id: string): string {
+  return Buffer.from(JSON.stringify([value, id])).toString("base64url");
+}
+
+function decodeCursor(cursor: string): [unknown, string] | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    if (Array.isArray(parsed) && parsed.length === 2 && typeof parsed[1] === "string") {
+      return parsed as [unknown, string];
+    }
+  } catch { /* malformed cursor */ }
+  return null;
+}
+
+/**
+ * Cursor-based product feed: stable under concurrent inserts/deletes, O(limit)
+ * at any depth, no count(*). Returns limit items + the cursor for the next page.
+ */
+export async function feed(opts: FeedOptions): Promise<{ products: Product[]; nextCursor: string | null }> {
+  const spec = FEED_SORTS[opts.sort] ?? FEED_SORTS.newest;
+  const cmp = spec.direction === "DESC" ? "<" : ">";
+
+  const conditions: string[] = ["p.is_active = true"];
+  const params: unknown[] = [];
+  let pi = 1;
+
+  if (opts.categorySlug) {
+    params.push(opts.categorySlug);
+    conditions.push(`c.slug = $${pi++}`);
+  }
+  if (opts.search) {
+    params.push(opts.search);
+    conditions.push(`p.search_vector @@ plainto_tsquery('english', $${pi++})`);
+  }
+  if (opts.minPriceCents != null) {
+    params.push(opts.minPriceCents);
+    conditions.push(`p.sell_price_kes_cents >= $${pi++}`);
+  }
+  if (opts.maxPriceCents != null) {
+    params.push(opts.maxPriceCents);
+    conditions.push(`p.sell_price_kes_cents <= $${pi++}`);
+  }
+
+  if (opts.cursor) {
+    const decoded = decodeCursor(opts.cursor);
+    if (decoded) {
+      const [value, id] = decoded;
+      params.push(spec.cast === "number" ? Number(value) : String(value), id);
+      conditions.push(`(${spec.column}, p.id) ${cmp} ($${pi++}, $${pi++}::uuid)`);
+    }
+  }
+
+  params.push(opts.limit + 1);
+  const { rows } = await db.query(
+    `SELECT p.* FROM products p
+     LEFT JOIN categories c ON c.id = p.category_id
+     WHERE ${conditions.join(" AND ")}
+     ORDER BY ${spec.column} ${spec.direction}, p.id ${spec.direction}
+     LIMIT $${pi++}`,
+    params,
+  );
+
+  const hasMore = rows.length > opts.limit;
+  const pageRows = hasMore ? rows.slice(0, opts.limit) : rows;
+  const products = pageRows.map(mapProduct);
+
+  let nextCursor: string | null = null;
+  if (hasMore && pageRows.length) {
+    const last = pageRows[pageRows.length - 1] as Record<string, unknown>;
+    const valueCol = spec.column.replace("p.", "");
+    const raw = last[valueCol];
+    const value = raw instanceof Date ? raw.toISOString() : spec.cast === "number" ? Number(raw) : String(raw);
+    nextCursor = encodeCursor(value, String(last.id));
+  }
+
+  return { products, nextCursor };
+}
+
 export async function findBySlug(slug: string): Promise<Product | null> {
   const { rows } = await db.query(
     `SELECT p.* FROM products p WHERE p.slug = $1 AND p.is_active = true`,
@@ -198,11 +351,12 @@ export async function create(data: {
   tags?: string[];
   images?: string[];
   sourcePriceUsdCents: number;
+  sourceCurrency?: string;
   markupPct?: number;
-  shippingFeeKesCents: number;
-  taxKesCents: number;
   sellPriceKesCents: number;
+  compareAtKesCents?: number;
   weightGrams?: number;
+  weightSource?: string;
   estimatedDaysMin?: number;
   estimatedDaysMax?: number;
   sourcePlatform?: string;
@@ -214,10 +368,12 @@ export async function create(data: {
   const { rows } = await db.query(
     `INSERT INTO products (
        name, slug, description, category_id, brand_id, tags, images,
-       source_price_usd_cents, markup_pct, shipping_fee_kes_cents,
-       tax_kes_cents, sell_price_kes_cents, estimated_days_min,
-       estimated_days_max, source_platform, source_url, source_id, is_featured
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+       source_price_usd_cents, source_currency, markup_pct,
+       sell_price_kes_cents, compare_at_kes_cents,
+       weight_grams, weight_source,
+       estimated_days_min, estimated_days_max,
+       source_platform, source_url, source_id, is_featured
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
      RETURNING *`,
     [
       data.name,
@@ -228,10 +384,12 @@ export async function create(data: {
       data.tags ?? [],
       data.images ?? [],
       data.sourcePriceUsdCents,
-      data.markupPct ?? 5,
-      data.shippingFeeKesCents,
-      data.taxKesCents,
+      data.sourceCurrency ?? "USD",
+      data.markupPct ?? 20,
       data.sellPriceKesCents,
+      data.compareAtKesCents ?? null,
+      data.weightGrams ?? 500,
+      data.weightSource ?? (data.weightGrams != null ? "manual" : "category_default"),
       data.estimatedDaysMin ?? 7,
       data.estimatedDaysMax ?? 14,
       data.sourcePlatform ?? "manual",
@@ -252,10 +410,12 @@ export async function update(
     tags: string[];
     images: string[];
     sourcePriceUsdCents: number;
+    sourceCurrency: string;
     markupPct: number;
-    shippingFeeKesCents: number;
-    taxKesCents: number;
     sellPriceKesCents: number;
+    compareAtKesCents: number | null;
+    weightGrams: number;
+    weightSource: string;
     stockStatus: string;
     isActive: boolean;
     isFeatured: boolean;
@@ -271,8 +431,9 @@ export async function update(
     name: "name", description: "description", categoryId: "category_id",
     tags: "tags", images: "images", sourcePriceUsdCents: "source_price_usd_cents",
     sourceCurrency: "source_currency",
-    markupPct: "markup_pct", shippingFeeKesCents: "shipping_fee_kes_cents",
-    taxKesCents: "tax_kes_cents", sellPriceKesCents: "sell_price_kes_cents",
+    markupPct: "markup_pct", sellPriceKesCents: "sell_price_kes_cents",
+    compareAtKesCents: "compare_at_kes_cents",
+    weightGrams: "weight_grams", weightSource: "weight_source",
     stockStatus: "stock_status", isActive: "is_active", isFeatured: "is_featured",
     estimatedDaysMin: "estimated_days_min", estimatedDaysMax: "estimated_days_max",
   };
@@ -298,12 +459,21 @@ export async function addVariant(
   productId: string,
   data: { attributes: Record<string, string>; sku?: string; priceDeltaKesCents?: number; stockQty?: number; imageUrl?: string },
 ): Promise<ProductVariant> {
+  const variantKey = canonicalVariantKey(data.attributes);
   const { rows } = await db.query(
-    `INSERT INTO product_variants (product_id, attributes, sku, price_delta_kes_cents, stock_qty, image_url)
-     VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+    `INSERT INTO product_variants (product_id, attributes, variant_key, sku, price_delta_kes_cents, stock_qty, image_url)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (product_id, variant_key) DO UPDATE
+       SET sku = EXCLUDED.sku,
+           price_delta_kes_cents = EXCLUDED.price_delta_kes_cents,
+           stock_qty = EXCLUDED.stock_qty,
+           image_url = EXCLUDED.image_url,
+           is_active = true
+     RETURNING *`,
     [
       productId,
       JSON.stringify(data.attributes),
+      variantKey,
       data.sku ?? null,
       data.priceDeltaKesCents ?? 0,
       data.stockQty ?? 0,
@@ -312,6 +482,12 @@ export async function addVariant(
   );
   await db.query(`UPDATE products SET has_variants = true WHERE id = $1`, [productId]);
   return mapVariant(rows[0]);
+}
+
+/** Deterministic variant identity: stable across re-scrapes for the same attribute set. */
+export function canonicalVariantKey(attributes: Record<string, string>): string {
+  const sorted = Object.keys(attributes).sort().map((k) => [k, attributes[k]]);
+  return JSON.stringify(sorted);
 }
 
 export async function getCategories(): Promise<{ id: string; name: string; slug: string; parentId: string | null; icon: string | null; imageUrl: string | null; sortOrder: number }[]> {

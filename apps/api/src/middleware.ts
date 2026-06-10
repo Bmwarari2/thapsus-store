@@ -1,7 +1,16 @@
 import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 
-const JWT_SECRET = process.env.JWT_SECRET ?? "dev_secret_change_in_prod";
+function resolveJwtSecret(): string {
+  const secret = process.env.JWT_SECRET;
+  if (secret) return secret;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("JWT_SECRET must be set in production — refusing to boot with a fallback secret");
+  }
+  return "dev_only_secret";
+}
+
+const JWT_SECRET = resolveJwtSecret();
 
 // ── Response helpers ──────────────────────────────────────────────────────────
 
@@ -30,7 +39,7 @@ declare global {
 }
 
 export function signToken(payload: AuthPayload): string {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: "30d" });
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: "7d" });
 }
 
 export function authOptional(req: Request, _res: Response, next: NextFunction) {

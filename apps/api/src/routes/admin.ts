@@ -4,7 +4,8 @@ import { envelope, errorEnvelope, requireAdmin } from "../middleware.js";
 import * as products from "../repos/products.js";
 import * as orders from "../repos/orders.js";
 import * as reviewRepo from "../repos/reviews.js";
-import { priceProduct, repriceAllProducts, invalidatePricingCache } from "../services/pricing.js";
+import { priceItem, repriceAllProducts, invalidatePricingCache } from "../services/pricing.js";
+import type { SourceCurrency } from "@thapsus/shared";
 import { sendOrderShipped, sendOrderDelivered } from "../services/email.js";
 import { db } from "../db.js";
 import type { OrderStatus } from "@thapsus/shared";
@@ -33,7 +34,7 @@ r.post("/products", async (req, res) => {
   }
   const d = parsed.data;
 
-  const breakdown = await priceProduct(d.sourcePriceUsdCents, 500, d.markupPct);
+  const sellPriceKesCents = await priceItem(d.sourcePriceUsdCents, "USD", d.markupPct);
 
   // Resolve or create brand
   let brandId: string | undefined;
@@ -57,9 +58,9 @@ r.post("/products", async (req, res) => {
     images: d.images,
     sourcePriceUsdCents: d.sourcePriceUsdCents,
     markupPct: d.markupPct,
-    shippingFeeKesCents: breakdown.shippingKes * 100,
-    taxKesCents: breakdown.vatKes * 100,
-    sellPriceKesCents: breakdown.totalKesCents,
+    sellPriceKesCents,
+    weightGrams: d.weightGrams,
+    weightSource: "manual",
     estimatedDaysMin: d.estimatedDaysMin,
     estimatedDaysMax: d.estimatedDaysMax,
     sourcePlatform: d.sourcePlatform,
@@ -79,21 +80,21 @@ r.patch("/products/:id", async (req, res) => {
   if (!existing) return res.status(404).json(errorEnvelope("not_found", "Product not found"));
 
   // Recompute pricing if source price or markup changed
-  let pricingUpdate: Partial<{ shippingFeeKesCents: number; taxKesCents: number; sellPriceKesCents: number }> = {};
+  let pricingUpdate: Partial<{ sellPriceKesCents: number }> = {};
   if (parsed.data.sourcePriceUsdCents != null || parsed.data.markupPct != null) {
-    const breakdown = await priceProduct(
-      parsed.data.sourcePriceUsdCents ?? existing.sourcePriceUsdCents,
-      500,
-      parsed.data.markupPct ?? existing.markupPct,
-    );
     pricingUpdate = {
-      shippingFeeKesCents: breakdown.shippingKes * 100,
-      taxKesCents: breakdown.vatKes * 100,
-      sellPriceKesCents: breakdown.totalKesCents,
+      sellPriceKesCents: await priceItem(
+        parsed.data.sourcePriceUsdCents ?? existing.sourcePriceUsdCents,
+        existing.sourceCurrency as SourceCurrency,
+        parsed.data.markupPct ?? existing.markupPct,
+      ),
     };
   }
 
-  const updated = await products.update(req.params.id, { ...parsed.data, ...pricingUpdate });
+  // An admin-set weight is an explicit override.
+  const weightUpdate = parsed.data.weightGrams != null ? { weightSource: "manual" } : {};
+
+  const updated = await products.update(req.params.id, { ...parsed.data, ...pricingUpdate, ...weightUpdate });
   return res.json(envelope(updated));
 });
 
@@ -199,13 +200,14 @@ r.post("/import-jobs", async (req, res) => {
   }
 
   const { rows: [job] } = await db.query(
-    `INSERT INTO import_jobs (source_platform, source_url, search_query, category_id, created_by)
-     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    `INSERT INTO import_jobs (source_platform, source_url, search_query, category_id, max_products, created_by)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
     [
       parsed.data.sourcePlatform,
       parsed.data.sourceUrl ?? null,
       parsed.data.searchQuery ?? null,
       parsed.data.categoryId ?? null,
+      parsed.data.maxProducts ?? null,
       req.user!.id,
     ],
   );
@@ -215,7 +217,8 @@ r.post("/import-jobs", async (req, res) => {
     const { getImportQueue } = await import("../queue.js");
     await getImportQueue().add("import-product", { jobId: job.id }, { jobId: job.id });
   } catch {
-    // Queue not available in dev without Redis — job is still in DB and can be picked up
+    // Queue unreachable — the row stays 'queued' and the worker's stranded-job
+    // sweep enqueues it within ~10 minutes.
   }
 
   return res.status(202).json(envelope(job));
@@ -274,6 +277,19 @@ r.patch("/pricing-config", async (req, res) => {
   return res.json(envelope({ updated: Object.keys(updates).length }));
 });
 
+// ── Scrape budget gauge ───────────────────────────────────────────────────────
+
+r.get("/scrape-budget", async (_req, res) => {
+  const [{ rows: callRows }, { rows: cfgRows }] = await Promise.all([
+    db.query(`SELECT count(*)::int AS used FROM scrape_calls WHERE created_at >= date_trunc('day', now())`),
+    db.query(`SELECT value FROM pricing_config WHERE key = 'scrape_daily_budget'`),
+  ]);
+  return res.json(envelope({
+    usedToday: callRows[0].used,
+    dailyBudget: Number(cfgRows[0]?.value ?? 400),
+  }));
+});
+
 // ── Categories ────────────────────────────────────────────────────────────────
 
 r.post("/categories", async (req, res) => {
@@ -294,11 +310,12 @@ r.get("/analytics", async (_req, res) => {
   const [revenue, orderCounts, topProducts, recentOrders] = await Promise.all([
     db.query(`
       SELECT
-        sum(CASE WHEN created_at >= now() - interval '1 day'  THEN total_cents END) AS today,
-        sum(CASE WHEN created_at >= now() - interval '7 days' THEN total_cents END) AS week,
-        sum(CASE WHEN created_at >= now() - interval '30 days' THEN total_cents END) AS month,
+        sum(CASE WHEN paid_at >= now() - interval '1 day'  THEN total_cents END) AS today,
+        sum(CASE WHEN paid_at >= now() - interval '7 days' THEN total_cents END) AS week,
+        sum(CASE WHEN paid_at >= now() - interval '30 days' THEN total_cents END) AS month,
         sum(total_cents) AS all_time
-      FROM orders WHERE status NOT IN ('cancelled', 'refunded')
+      FROM orders
+      WHERE paid_at IS NOT NULL AND status NOT IN ('cancelled', 'refunded')
     `),
     db.query(`
       SELECT status, count(*)::int AS count FROM orders GROUP BY status
