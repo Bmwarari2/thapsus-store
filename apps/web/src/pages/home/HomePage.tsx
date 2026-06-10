@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useQuery } from '@tanstack/react-query';
@@ -6,7 +6,9 @@ import { ProductGrid } from '../../components/product/ProductGrid';
 import { ProductCard } from '../../components/product/ProductCard';
 import { Button } from '../../components/ui/Button';
 import { SkeletonCard } from '../../components/shared/SkeletonCard';
-import { apiGetFeaturedProducts, apiGetCategories } from '../../lib/api';
+import { apiGetFeaturedProducts, apiGetCategories, type Product } from '../../lib/api';
+import { useInfiniteProducts } from '../../hooks/useInfiniteProducts';
+import { useIntersection } from '../../hooks/useIntersection';
 
 const BANNERS = [
   {
@@ -40,6 +42,30 @@ export const HomePage = () => {
   const { data: categories = [] } = useQuery({
     queryKey: ['categories'],
     queryFn: apiGetCategories,
+  });
+
+  // Endless new-arrivals feed at the bottom of the page.
+  const {
+    data: feedData,
+    isLoading: loadingFeed,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteProducts({ sort: 'newest' });
+
+  const feedProducts = useMemo(() => {
+    const seen = new Set<string>();
+    const out: Product[] = [];
+    for (const page of feedData?.pages ?? []) {
+      for (const p of page.items) {
+        if (!seen.has(p.id)) { seen.add(p.id); out.push(p); }
+      }
+    }
+    return out;
+  }, [feedData]);
+
+  const feedSentinelRef = useIntersection(() => {
+    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
   });
 
   // Only show top-level categories in the nav strip
@@ -172,26 +198,37 @@ export const HomePage = () => {
           )}
         </section>
 
-        {/* New Arrivals Grid */}
-        <section>
-          <div className="flex items-center justify-between mb-6">
-            <h2 className="text-2xl font-bold tracking-tight">New Arrivals</h2>
-            <Link to="/products?sort=newest" className="text-sm font-semibold text-primary hover:underline">View All</Link>
-          </div>
-          {loadingFeatured ? (
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-              {Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)}
-            </div>
-          ) : (
-            <ProductGrid products={featured} />
-          )}
-        </section>
-
         {/* App Download Banner */}
         <section className="bg-gradient-to-r from-primary/10 to-secondary/10 rounded-3xl p-8 md:p-12 text-center flex flex-col items-center justify-center space-y-4">
           <h2 className="text-3xl font-black tracking-tight text-textPrimary">Get the Thapsus App</h2>
           <p className="text-textSecondary max-w-md">Enjoy exclusive app-only deals and track your orders in real time. Coming soon to iOS and Android.</p>
           <Button variant="secondary" size="lg" disabled>Coming Soon</Button>
+        </section>
+
+        {/* New Arrivals — endless feed, SHEIN-style */}
+        <section>
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-2xl font-bold tracking-tight">New Arrivals</h2>
+            <Link to="/products?sort=newest" className="text-sm font-semibold text-primary hover:underline">Browse All</Link>
+          </div>
+          {loadingFeed ? (
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
+              {Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)}
+            </div>
+          ) : (
+            <>
+              <ProductGrid products={feedProducts} />
+              {isFetchingNextPage && (
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6 mt-6">
+                  {Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />)}
+                </div>
+              )}
+              {!hasNextPage && feedProducts.length > 12 && (
+                <p className="mt-12 text-center text-textSecondary text-sm">You've seen everything ✨</p>
+              )}
+              <div ref={feedSentinelRef} aria-hidden className="h-px" />
+            </>
+          )}
         </section>
 
       </div>

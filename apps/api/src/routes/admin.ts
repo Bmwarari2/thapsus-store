@@ -181,6 +181,119 @@ r.patch("/orders/:id/status", async (req, res) => {
   return res.json(envelope(updated));
 });
 
+// ── Purchasing (fulfilment report) ───────────────────────────────────────────
+// Rolling list of paid-but-not-yet-sourced order lines with direct links to
+// each item on its source site, so the admin can complete the purchases.
+// Line items are ticked off individually; when an order's last line is
+// purchased the order advances to 'sourcing' automatically.
+
+r.get("/purchasing", async (req, res) => {
+  const includeDone = req.query.include_done === "true";
+  const { rows } = await db.query(
+    `SELECT o.id            AS order_id,
+            o.order_number,
+            o.paid_at,
+            o.status        AS order_status,
+            o.delivery_address_snap->>'fullName' AS customer_name,
+            oi.id           AS item_id,
+            oi.product_name_snap,
+            oi.product_image_snap,
+            oi.variant_attrs_snap,
+            oi.qty,
+            oi.unit_price_cents,
+            oi.purchased_at,
+            p.source_platform,
+            p.source_url,
+            p.source_price_usd_cents,
+            p.source_currency,
+            pv.attributes   AS live_variant_attrs
+     FROM orders o
+     JOIN order_items oi ON oi.order_id = o.id
+     JOIN products p     ON p.id = oi.product_id
+     LEFT JOIN product_variants pv ON pv.id = oi.variant_id
+     WHERE o.paid_at IS NOT NULL
+       AND o.status IN ('payment_confirmed', 'sourcing')
+       ${includeDone ? "" : "AND oi.purchased_at IS NULL"}
+     ORDER BY o.paid_at ASC, oi.created_at`,
+  );
+
+  // Group lines under their orders for the UI.
+  const orders = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    if (!orders.has(row.order_id)) {
+      orders.set(row.order_id, {
+        orderId: row.order_id,
+        orderNumber: row.order_number,
+        paidAt: row.paid_at,
+        orderStatus: row.order_status,
+        customerName: row.customer_name,
+        items: [],
+      });
+    }
+    (orders.get(row.order_id)!.items as unknown[]).push({
+      itemId: row.item_id,
+      name: row.product_name_snap,
+      image: row.product_image_snap,
+      attrs: row.variant_attrs_snap ?? row.live_variant_attrs,
+      qty: Number(row.qty),
+      unitPriceCents: Number(row.unit_price_cents),
+      purchasedAt: row.purchased_at,
+      sourcePlatform: row.source_platform,
+      sourceUrl: row.source_url,
+      sourcePriceCents: Number(row.source_price_usd_cents),
+      sourceCurrency: row.source_currency,
+    });
+  }
+
+  return res.json(envelope([...orders.values()]));
+});
+
+r.patch("/purchasing/items/:id", async (req, res) => {
+  const purchased = req.body?.purchased !== false;
+  const { rows } = await db.query(
+    `UPDATE order_items
+     SET purchased_at = CASE WHEN $2 THEN now() ELSE NULL END,
+         purchased_by = CASE WHEN $2 THEN $3::uuid ELSE NULL END
+     WHERE id = $1
+     RETURNING id, order_id`,
+    [req.params.id, purchased, req.user!.id],
+  );
+  if (!rows[0]) return res.status(404).json(errorEnvelope("not_found", "Order item not found"));
+  const orderId = rows[0].order_id as string;
+
+  // All lines bought → the order is officially being sourced.
+  let orderAdvanced = false;
+  if (purchased) {
+    const { rows: remaining } = await db.query(
+      `SELECT count(*)::int AS open FROM order_items WHERE order_id = $1 AND purchased_at IS NULL`,
+      [orderId],
+    );
+    if (remaining[0].open === 0) {
+      const updated = await orders.updateStatus(orderId, "sourcing");
+      orderAdvanced = updated?.status === "sourcing";
+      if (orderAdvanced) {
+        await db.query(
+          `INSERT INTO notifications (user_id, type, title, body, data)
+           SELECT user_id, 'order_sourcing', 'Order Update',
+                  'Your items have been ordered from our suppliers and are on their way to our UK hub.',
+                  json_build_object('order_id', id)::jsonb
+           FROM orders WHERE id = $1`,
+          [orderId],
+        );
+      }
+    }
+  }
+
+  await db.query(
+    `INSERT INTO admin_logs (actor_id, action, entity, entity_id, meta)
+     VALUES ($1, $2, 'order_item', $3, $4)`,
+    [req.user!.id, purchased ? "mark_purchased" : "unmark_purchased", req.params.id,
+     JSON.stringify({ order_id: orderId, order_advanced: orderAdvanced })],
+  );
+
+  return res.json(envelope({ itemId: rows[0].id, purchased, orderAdvanced }));
+});
+
 // ── Import Jobs (Scraping) ────────────────────────────────────────────────────
 
 r.get("/import-jobs", async (_req, res) => {

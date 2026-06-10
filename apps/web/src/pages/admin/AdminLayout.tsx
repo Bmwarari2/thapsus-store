@@ -1,18 +1,20 @@
 import { useState } from 'react';
 import { Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
-import { LayoutDashboard, ShoppingBag, Users, Settings, Package, MessageSquare, Download, Menu, X } from 'lucide-react';
+import { LayoutDashboard, ShoppingBag, ShoppingCart, Users, Settings, Package, MessageSquare, Download, Menu, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '../../stores/authStore';
 import { ImportsPage } from './ImportsPage';
+import { PurchasingPage } from './PurchasingPage';
 
 const menu = [
-  { label: 'Dashboard',     path: '/admin',           icon: LayoutDashboard },
-  { label: 'Products',      path: '/admin/products',  icon: Package },
-  { label: 'Orders',        path: '/admin/orders',    icon: ShoppingBag },
-  { label: 'Reviews',       path: '/admin/reviews',   icon: MessageSquare },
-  { label: 'Customers',     path: '/admin/customers', icon: Users },
-  { label: 'Imports',       path: '/admin/imports',   icon: Download },
-  { label: 'Pricing Config', path: '/admin/pricing',  icon: Settings },
+  { label: 'Dashboard',     path: '/admin',            icon: LayoutDashboard },
+  { label: 'Purchasing',    path: '/admin/purchasing', icon: ShoppingCart },
+  { label: 'Products',      path: '/admin/products',   icon: Package },
+  { label: 'Orders',        path: '/admin/orders',     icon: ShoppingBag },
+  { label: 'Reviews',       path: '/admin/reviews',    icon: MessageSquare },
+  { label: 'Customers',     path: '/admin/customers',  icon: Users },
+  { label: 'Imports',       path: '/admin/imports',    icon: Download },
+  { label: 'Pricing Config', path: '/admin/pricing',   icon: Settings },
 ];
 
 const NavLinks = ({ onNavigate }: { onNavigate?: () => void }) => {
@@ -135,6 +137,7 @@ export const AdminLayout = () => {
       <main className="flex-1 overflow-x-hidden pt-14 md:pt-0">
         <Routes>
           <Route index element={<Dashboard />} />
+          <Route path="purchasing" element={<PurchasingPage />} />
           <Route path="products"  element={<Placeholder title="Products Management" />} />
           <Route path="orders"    element={<Placeholder title="Orders Management" />} />
           <Route path="reviews"   element={<Placeholder title="Reviews Moderation" />} />

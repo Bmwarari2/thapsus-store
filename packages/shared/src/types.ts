@@ -20,7 +20,7 @@ export type ReviewStatus = "pending" | "approved" | "rejected";
 
 // 'alibaba' remains only as a legacy value on old rows — the import pipeline
 // no longer scrapes it.
-export type SourcePlatform = "alibaba" | "aliexpress" | "shein" | "manual";
+export type SourcePlatform = "alibaba" | "aliexpress" | "shein" | "amazon" | "manual";
 
 export type WeightSource = "scraped" | "category_default" | "manual";
 

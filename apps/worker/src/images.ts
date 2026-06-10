@@ -94,10 +94,15 @@ async function recordImageFailure(productId: string, sourceUrl: string, reason: 
   ).catch((err) => console.error("[images] failed to record image failure:", err));
 }
 
-export async function uploadProductImages(
+/**
+ * Upload product images and return CDN URLs **aligned 1:1 with the input**
+ * (null where an image failed). Callers rely on the alignment to map source
+ * URLs → CDN URLs for variant swatches, so failures must hold their position.
+ */
+export async function uploadProductImagesAligned(
   productId: string,
   sourceUrls: string[],
-): Promise<string[]> {
+): Promise<(string | null)[]> {
   const s3 = getS3();
 
   // No R2 configured — return originals (dev mode)
@@ -106,7 +111,7 @@ export async function uploadProductImages(
     return sourceUrls;
   }
 
-  const cdnUrls: string[] = [];
+  const cdnUrls: (string | null)[] = [];
 
   for (const rawUrl of sourceUrls) {
     const sourceUrl = normalizeImageUrl(rawUrl);
@@ -122,6 +127,7 @@ export async function uploadProductImages(
       const original = await downloadImage(sourceUrl);
       if (!original) {
         await recordImageFailure(productId, sourceUrl, "download_failed");
+        cdnUrls.push(null);
         continue;
       }
 
@@ -149,14 +155,23 @@ export async function uploadProductImages(
     } catch (err) {
       console.error(`[images] error processing image for product ${productId}:`, err);
       await recordImageFailure(productId, sourceUrl, err instanceof Error ? err.message : String(err));
+      cdnUrls.push(null);
     }
   }
 
-  // Everything failed — keep the catalog usable rather than imageless.
-  if (!cdnUrls.length && sourceUrls.length) {
+  return cdnUrls;
+}
+
+/** Convenience wrapper: drops failures; falls back to source URLs when everything failed. */
+export async function uploadProductImages(
+  productId: string,
+  sourceUrls: string[],
+): Promise<string[]> {
+  const aligned = await uploadProductImagesAligned(productId, sourceUrls);
+  const ok = aligned.filter((u): u is string => u != null);
+  if (!ok.length && sourceUrls.length) {
     console.warn(`[images] all ${sourceUrls.length} images failed for product ${productId}; falling back to source URLs`);
     return sourceUrls.map(normalizeImageUrl);
   }
-
-  return cdnUrls;
+  return ok;
 }

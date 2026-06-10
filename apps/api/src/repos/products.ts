@@ -490,10 +490,18 @@ export function canonicalVariantKey(attributes: Record<string, string>): string 
   return JSON.stringify(sorted);
 }
 
-export async function getCategories(): Promise<{ id: string; name: string; slug: string; parentId: string | null; icon: string | null; imageUrl: string | null; sortOrder: number }[]> {
+export async function getCategories(): Promise<{ id: string; name: string; slug: string; parentId: string | null; icon: string | null; imageUrl: string | null; sortOrder: number; productCount: number; previewImage: string | null }[]> {
   const { rows } = await db.query(
-    `SELECT id, name, slug, parent_id, icon, image_url, sort_order
-     FROM categories WHERE is_active = true ORDER BY sort_order, name`,
+    `SELECT c.id, c.name, c.slug, c.parent_id, c.icon, c.image_url, c.sort_order,
+            count(p.id)::int AS product_count,
+            (SELECT p2.images[1] FROM products p2
+             WHERE p2.category_id = c.id AND p2.is_active AND array_length(p2.images, 1) > 0
+             ORDER BY p2.order_count DESC, p2.created_at DESC LIMIT 1) AS preview_image
+     FROM categories c
+     LEFT JOIN products p ON p.category_id = c.id AND p.is_active
+     WHERE c.is_active = true
+     GROUP BY c.id
+     ORDER BY c.sort_order, c.name`,
   );
   return rows.map((r: Record<string, unknown>) => ({
     id: r.id as string,
@@ -503,6 +511,8 @@ export async function getCategories(): Promise<{ id: string; name: string; slug:
     icon: r.icon as string | null,
     imageUrl: r.image_url as string | null,
     sortOrder: r.sort_order as number,
+    productCount: Number(r.product_count),
+    previewImage: r.preview_image as string | null,
   }));
 }
 
