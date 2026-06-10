@@ -9,6 +9,7 @@ import { PriceDisplay } from './PriceDisplay';
 import { useCartStore } from '../../stores/cartStore';
 import { useAuthStore } from '../../stores/authStore';
 import { apiAddToCart, type Product } from '../../lib/api';
+import { imageSrcSet } from '../../lib/utils';
 import toast from 'react-hot-toast';
 
 interface ProductCardProps {
@@ -73,7 +74,8 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
         transition={{ type: "spring", stiffness: 300, damping: 20 }}
       >
         <motion.img
-          src={product.images[0] || 'https://placehold.co/400x600?text=No+Image'}
+          {...imageSrcSet(product.images[0] || 'https://placehold.co/400x600?text=No+Image')}
+          sizes="(max-width: 768px) 50vw, (max-width: 1024px) 33vw, 25vw"
           alt={product.name}
           className="h-full w-full object-cover object-center"
           whileHover={{ scale: 1.05 }}

@@ -144,5 +144,36 @@ export async function consumeResetToken(tokenHash: string): Promise<string | nul
 
 export async function updatePassword(userId: string, newPassword: string): Promise<void> {
   const hash = await bcrypt.hash(newPassword, 12);
-  await db.query(`UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1`, [userId, hash]);
+  // password_changed_at invalidates every token issued before this moment.
+  await db.query(
+    `UPDATE users SET password_hash = $2, password_changed_at = now(), updated_at = now() WHERE id = $1`,
+    [userId, hash],
+  );
+}
+
+/**
+ * Auth gate data, cached 60s per user: tokens minted before the last password
+ * change (or for deactivated accounts) are rejected without a per-request
+ * bcrypt or full-profile load.
+ */
+const authGateCache = new Map<string, { isActive: boolean; passwordChangedAt: number | null; expires: number }>();
+
+export async function getAuthGate(userId: string): Promise<{ isActive: boolean; passwordChangedAt: number | null } | null> {
+  const cached = authGateCache.get(userId);
+  if (cached && cached.expires > Date.now()) {
+    return { isActive: cached.isActive, passwordChangedAt: cached.passwordChangedAt };
+  }
+  const { rows } = await db.query(
+    `SELECT is_active, password_changed_at FROM users WHERE id = $1`,
+    [userId],
+  );
+  if (!rows[0]) return null;
+  const gate = {
+    isActive: rows[0].is_active as boolean,
+    passwordChangedAt: rows[0].password_changed_at
+      ? new Date(rows[0].password_changed_at as string).getTime()
+      : null,
+  };
+  authGateCache.set(userId, { ...gate, expires: Date.now() + 60_000 });
+  return gate;
 }

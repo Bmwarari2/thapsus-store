@@ -1,14 +1,25 @@
 /**
- * Image pipeline: download from source URL → upload to Cloudflare R2 → return CDN URL.
- * Falls back to the original URL if R2 is not configured (useful in development).
+ * Image pipeline: download from source URL → encode WebP at 320/640/1280 →
+ * upload to Cloudflare R2 → return the 640w CDN URL (siblings derive by
+ * convention: …_640.webp ↔ …_320.webp / …_1280.webp).
+ *
+ * Grid cards load the 320/640 variants instead of multi-MB source originals.
+ * Downloads use a real browser UA + referer (image CDNs block bot strings).
+ * When a download fails the image is skipped and the failure recorded in
+ * admin_logs — only if NOTHING could be processed do we fall back to the
+ * source URLs so a product is never left imageless.
  */
 
 import { createHash } from "node:crypto";
+import sharp from "sharp";
 import { S3Client, PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
+import { db } from "./db.js";
 
-// A real browser UA — image CDNs commonly block obvious bot strings.
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+export const IMAGE_WIDTHS = [320, 640, 1280] as const;
+const PRIMARY_WIDTH = 640;
 
 let _s3: S3Client | null = null;
 
@@ -28,21 +39,15 @@ function getS3(): S3Client | null {
 }
 
 // Keyed by a hash of the source URL (not gallery position) so re-scrapes with
-// a reordered gallery still hit the skip-if-exists path and never serve the
-// wrong image under an old key.
-function r2Key(productId: string, sourceUrl: string, ext = "jpg"): string {
+// a reordered gallery still hit the skip-if-exists path.
+function r2Key(productId: string, sourceUrl: string, width: number): string {
   const hash = createHash("sha1").update(sourceUrl).digest("hex").slice(0, 16);
-  return `products/${productId}/${hash}.${ext}`;
+  return `products/${productId}/${hash}_${width}.webp`;
 }
 
 function cdnUrl(key: string): string {
   const base = process.env.R2_PUBLIC_URL ?? "";
   return `${base}/${key}`;
-}
-
-function extFromUrl(url: string): string {
-  const m = url.split("?")[0].match(/\.(\w{2,4})$/);
-  return m?.[1]?.toLowerCase() ?? "jpg";
 }
 
 /**
@@ -65,6 +70,30 @@ async function alreadyUploaded(s3: S3Client, key: string): Promise<boolean> {
   }
 }
 
+async function downloadImage(sourceUrl: string): Promise<Buffer | null> {
+  const res = await fetch(sourceUrl, {
+    headers: {
+      "User-Agent": BROWSER_UA,
+      Referer: new URL(sourceUrl).origin + "/",
+      Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (!res.ok) {
+    console.warn(`[images] failed to fetch ${sourceUrl}: ${res.status}`);
+    return null;
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function recordImageFailure(productId: string, sourceUrl: string, reason: string): Promise<void> {
+  await db.query(
+    `INSERT INTO admin_logs (actor_id, action, entity, entity_id, meta)
+     VALUES (NULL, 'needs_image_refresh', 'product', $1, $2)`,
+    [productId, JSON.stringify({ source_url: sourceUrl, reason })],
+  ).catch((err) => console.error("[images] failed to record image failure:", err));
+}
+
 export async function uploadProductImages(
   productId: string,
   sourceUrls: string[],
@@ -79,51 +108,54 @@ export async function uploadProductImages(
 
   const cdnUrls: string[] = [];
 
-  for (let i = 0; i < sourceUrls.length; i++) {
-    const sourceUrl = normalizeImageUrl(sourceUrls[i]);
-    const ext = extFromUrl(sourceUrl);
-    const key = r2Key(productId, sourceUrl, ext);
+  for (const rawUrl of sourceUrls) {
+    const sourceUrl = normalizeImageUrl(rawUrl);
+    const primaryKey = r2Key(productId, sourceUrl, PRIMARY_WIDTH);
 
     try {
-      // Skip re-upload if already exists
-      if (await alreadyUploaded(s3, key)) {
-        cdnUrls.push(cdnUrl(key));
+      // Variants are written together, so the primary existing ⇒ all exist.
+      if (await alreadyUploaded(s3, primaryKey)) {
+        cdnUrls.push(cdnUrl(primaryKey));
         continue;
       }
 
-      const res = await fetch(sourceUrl, {
-        headers: {
-          "User-Agent": BROWSER_UA,
-          Referer: new URL(sourceUrl).origin + "/",
-          Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
-        },
-        signal: AbortSignal.timeout(15_000),
-      });
-
-      if (!res.ok) {
-        console.warn(`[images] failed to fetch ${sourceUrl}: ${res.status}`);
-        cdnUrls.push(sourceUrl); // fallback to original
+      const original = await downloadImage(sourceUrl);
+      if (!original) {
+        await recordImageFailure(productId, sourceUrl, "download_failed");
         continue;
       }
 
-      const buffer = Buffer.from(await res.arrayBuffer());
-      const contentType = res.headers.get("content-type") ?? "image/jpeg";
+      const meta = await sharp(original).metadata();
+      const originalWidth = meta.width ?? PRIMARY_WIDTH;
 
-      await s3.send(
-        new PutObjectCommand({
-          Bucket: process.env.R2_BUCKET!,
-          Key: key,
-          Body: buffer,
-          ContentType: contentType,
-          CacheControl: "public, max-age=31536000, immutable",
-        }),
-      );
+      for (const width of IMAGE_WIDTHS) {
+        const pipeline = sharp(original).rotate(); // honour EXIF orientation
+        // Never upscale — encode at the original size for widths beyond it.
+        const resized = width < originalWidth ? pipeline.resize({ width }) : pipeline;
+        const webp = await resized.webp({ quality: width <= 320 ? 70 : 78 }).toBuffer();
 
-      cdnUrls.push(cdnUrl(key));
+        await s3.send(
+          new PutObjectCommand({
+            Bucket: process.env.R2_BUCKET!,
+            Key: r2Key(productId, sourceUrl, width),
+            Body: webp,
+            ContentType: "image/webp",
+            CacheControl: "public, max-age=31536000, immutable",
+          }),
+        );
+      }
+
+      cdnUrls.push(cdnUrl(primaryKey));
     } catch (err) {
-      console.error(`[images] error uploading image ${i} for product ${productId}:`, err);
-      cdnUrls.push(sourceUrl); // fallback
+      console.error(`[images] error processing image for product ${productId}:`, err);
+      await recordImageFailure(productId, sourceUrl, err instanceof Error ? err.message : String(err));
     }
+  }
+
+  // Everything failed — keep the catalog usable rather than imageless.
+  if (!cdnUrls.length && sourceUrls.length) {
+    console.warn(`[images] all ${sourceUrls.length} images failed for product ${productId}; falling back to source URLs`);
+    return sourceUrls.map(normalizeImageUrl);
   }
 
   return cdnUrls;
