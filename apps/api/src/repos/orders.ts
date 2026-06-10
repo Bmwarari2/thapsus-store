@@ -13,6 +13,8 @@ export interface Order {
   subtotalCents: number;
   shippingCents: number;
   taxCents: number;
+  dutyCents: number;
+  vatCents: number;
   discountCents: number;
   totalCents: number;
   paymentMethod: string | null;
@@ -20,6 +22,7 @@ export interface Order {
   paidAt: string | null;
   trackingNumber: string | null;
   promotionId: string | null;
+  quoteId: string | null;
   notes: string | null;
   createdAt: string;
   updatedAt: string;
@@ -51,6 +54,8 @@ function mapOrder(row: Record<string, unknown>): Order {
     subtotalCents: Number(row.subtotal_cents),
     shippingCents: Number(row.shipping_cents),
     taxCents: Number(row.tax_cents),
+    dutyCents: Number(row.duty_cents ?? 0),
+    vatCents: Number(row.vat_cents ?? 0),
     discountCents: Number(row.discount_cents),
     totalCents: Number(row.total_cents),
     paymentMethod: row.payment_method as string | null,
@@ -58,6 +63,7 @@ function mapOrder(row: Record<string, unknown>): Order {
     paidAt: row.paid_at as string | null,
     trackingNumber: row.tracking_number as string | null,
     promotionId: row.promotion_id as string | null,
+    quoteId: row.quote_id as string | null,
     notes: row.notes as string | null,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
@@ -87,10 +93,14 @@ export interface CreateOrderData {
   subtotalCents: number;
   shippingCents: number;
   taxCents: number;
+  dutyCents: number;
+  vatCents: number;
   discountCents: number;
   totalCents: number;
   paymentMethod: string;
   promotionId?: string;
+  quoteId?: string;
+  idempotencyKey?: string;
   notes?: string;
   items: {
     productId: string;
@@ -103,7 +113,12 @@ export interface CreateOrderData {
   }[];
 }
 
-export async function create(data: CreateOrderData): Promise<Order> {
+/**
+ * Creates the order + items in one transaction. Idempotent: a replay with the
+ * same (user, Idempotency-Key) or the same quote returns the original order
+ * instead of creating a duplicate.
+ */
+export async function create(data: CreateOrderData): Promise<{ order: Order; replayed: boolean }> {
   const client = await db.connect();
   try {
     await client.query("BEGIN");
@@ -112,9 +127,9 @@ export async function create(data: CreateOrderData): Promise<Order> {
       `INSERT INTO orders (
          user_id, delivery_address_id, delivery_address_snap,
          estimated_delivery_at, subtotal_cents, shipping_cents,
-         tax_cents, discount_cents, total_cents,
-         payment_method, promotion_id, notes
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         tax_cents, duty_cents, vat_cents, discount_cents, total_cents,
+         payment_method, promotion_id, quote_id, idempotency_key, notes
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
        RETURNING *`,
       [
         data.userId,
@@ -124,10 +139,14 @@ export async function create(data: CreateOrderData): Promise<Order> {
         data.subtotalCents,
         data.shippingCents,
         data.taxCents,
+        data.dutyCents,
+        data.vatCents,
         data.discountCents,
         data.totalCents,
         data.paymentMethod,
         data.promotionId ?? null,
+        data.quoteId ?? null,
+        data.idempotencyKey ?? null,
         data.notes ?? null,
       ],
     );
@@ -150,21 +169,39 @@ export async function create(data: CreateOrderData): Promise<Order> {
           item.qty * item.unitPriceCents,
         ],
       );
-      // Increment order count on product
-      await client.query(
-        `UPDATE products SET order_count = order_count + $2 WHERE id = $1`,
-        [item.productId, item.qty],
-      );
     }
 
     await client.query("COMMIT");
-    return mapOrder(order);
+    return { order: mapOrder(order), replayed: false };
   } catch (err) {
     await client.query("ROLLBACK");
+    // Unique violation on the idempotency key or quote linkage → fetch and
+    // return the order the first request created.
+    if ((err as { code?: string }).code === "23505") {
+      const existing = data.idempotencyKey
+        ? await findByIdempotencyKey(data.userId, data.idempotencyKey)
+        : data.quoteId
+          ? await findByQuoteId(data.quoteId)
+          : null;
+      if (existing) return { order: existing, replayed: true };
+    }
     throw err;
   } finally {
     client.release();
   }
+}
+
+export async function findByIdempotencyKey(userId: string, key: string): Promise<Order | null> {
+  const { rows } = await db.query(
+    `SELECT * FROM orders WHERE user_id = $1 AND idempotency_key = $2`,
+    [userId, key],
+  );
+  return rows[0] ? mapOrder(rows[0]) : null;
+}
+
+export async function findByQuoteId(quoteId: string): Promise<Order | null> {
+  const { rows } = await db.query(`SELECT * FROM orders WHERE quote_id = $1`, [quoteId]);
+  return rows[0] ? mapOrder(rows[0]) : null;
 }
 
 export async function findById(id: string, userId?: string): Promise<Order | null> {

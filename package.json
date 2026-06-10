@@ -13,6 +13,7 @@
     "start:api": "pnpm --filter @thapsus/api start",
     "start:worker": "pnpm --filter @thapsus/worker start",
     "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r --if-present test",
     "lint": "pnpm -r lint",
     "migrate": "node scripts/migrate.mjs"
   },

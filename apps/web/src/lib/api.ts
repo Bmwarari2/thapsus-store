@@ -31,6 +31,8 @@ export interface Category {
   sortOrder: number;
 }
 
+// Mirrors the API's PublicProduct — no cost/markup/source fields exist on the
+// public surface.
 export interface Product {
   id: string;
   name: string;
@@ -38,18 +40,16 @@ export interface Product {
   description: string | null;
   images: string[];
   sellPriceKesCents: number;
-  sourcePriceUsdCents: number;
-  shippingFeeKesCents: number;
-  taxKesCents: number;
+  compareAtKesCents: number | null;
   hasVariants: boolean;
   stockStatus: string;
   rating: number | null;
   reviewCount: number;
   estimatedDaysMin: number;
   estimatedDaysMax: number;
-  isActive: boolean;
   isFeatured: boolean;
   categoryId: string;
+  createdAt: string;
 }
 
 export interface ProductVariant {
@@ -73,6 +73,7 @@ export interface CartItem {
   productSlug?: string;
   productImage?: string;
   variantAttributes?: Record<string, string> | null;
+  currentPriceCents?: number;
 }
 
 export interface AuthUser {
@@ -80,6 +81,74 @@ export interface AuthUser {
   email: string;
   fullName: string | null;
   role: string;
+}
+
+export interface DeliveryAddress {
+  id: string;
+  label: string;
+  full_name: string;
+  phone: string;
+  county: string;
+  town: string;
+  address_line: string;
+  is_default: boolean;
+}
+
+export interface QuoteLine {
+  productId: string;
+  variantId: string | null;
+  qty: number;
+  unitPriceCents: number;
+  weightGrams: number;
+  nameSnap: string;
+  imageSnap: string | null;
+  attrsSnap: Record<string, string> | null;
+}
+
+export interface OrderQuote {
+  quoteId: string;
+  expiresAt: string;
+  lines: QuoteLine[];
+  itemsCents: number;
+  deliveryCents: number;
+  dutyCents: number;
+  vatCents: number;
+  discountCents: number;
+  totalCents: number;
+  totalWeightGrams: number;
+  estimatedDelivery: string;
+  estDaysMin: number;
+  estDaysMax: number;
+  warnings: string[];
+}
+
+export interface Order {
+  id: string;
+  orderNumber: string;
+  status: string;
+  subtotalCents: number;
+  shippingCents: number;
+  dutyCents: number;
+  vatCents: number;
+  discountCents: number;
+  totalCents: number;
+  paymentMethod: string | null;
+  paymentRef: string | null;
+  paidAt: string | null;
+  deliveryAddressSnap: Record<string, string> | null;
+  estimatedDeliveryAt: string | null;
+  createdAt: string;
+}
+
+export interface OrderItem {
+  id: string;
+  productId: string;
+  productNameSnap: string;
+  productImageSnap: string | null;
+  variantAttrsSnap: Record<string, string> | null;
+  qty: number;
+  unitPriceCents: number;
+  totalCents: number;
 }
 
 const unwrap = <T>(res: { data: { data: T } }): T => res.data.data;
@@ -96,6 +165,14 @@ export const apiGetFeaturedProducts = () =>
 
 export const apiGetProducts = (params: Record<string, string | number | boolean | undefined>) =>
   api.get('/products', { params }).then(unwrap<{ products: Product[]; total: number }>);
+
+export interface FeedPage {
+  items: Product[];
+  nextCursor: string | null;
+}
+
+export const apiGetFeed = (params: Record<string, string | number | undefined>) =>
+  api.get('/products/feed', { params }).then(unwrap<FeedPage>);
 
 export const apiGetProduct = (slug: string) =>
   api.get(`/products/${slug}`).then(unwrap<{
@@ -126,11 +203,51 @@ export const apiUpdateCartItem = (id: string, qty: number) =>
 export const apiRemoveCartItem = (id: string) =>
   api.delete(`/cart/items/${id}`).then(unwrap<{ removed: boolean }>);
 
+// ── Addresses ─────────────────────────────────────────────────────────────────
+
+export const apiGetAddresses = () =>
+  api.get('/me/addresses').then(unwrap<DeliveryAddress[]>);
+
+export const apiCreateAddress = (body: {
+  label?: string;
+  fullName: string;
+  phone: string;
+  county: string;
+  town: string;
+  addressLine: string;
+  isDefault?: boolean;
+}) => api.post('/me/addresses', body).then(unwrap<DeliveryAddress>);
+
+// ── Checkout: quote → order → pay ─────────────────────────────────────────────
+
+export const apiCreateQuote = (promotionCode?: string) =>
+  api.post('/orders/quote', { promotionCode }).then(unwrap<OrderQuote>);
+
+export const apiCreateOrder = (body: {
+  quoteId: string;
+  deliveryAddressId: string;
+  paymentMethod: 'mpesa';
+  notes?: string;
+}, idempotencyKey: string) =>
+  api.post('/orders', body, { headers: { 'Idempotency-Key': idempotencyKey } })
+    .then(unwrap<{ order: Order; replayed: boolean }>);
+
+export const apiGetOrder = (id: string) =>
+  api.get(`/orders/${id}`).then(unwrap<{ order: Order; items: OrderItem[] }>);
+
+export const apiInitiateMpesa = (orderId: string, phone: string) =>
+  api.post('/payments/mpesa/initiate', { orderId, phone })
+    .then(unwrap<{ checkoutRequestId: string }>);
+
+export const apiGetPaymentStatus = (orderId: string) =>
+  api.get(`/orders/${orderId}/payment-status`)
+    .then(unwrap<{ status: 'paid' | 'pending' | 'cancelled'; paidAt: string | null; paymentRef: string | null }>);
+
 // ── Admin: Import Jobs ────────────────────────────────────────────────────────
 
 export interface ImportJob {
   id: string;
-  source_platform: 'aliexpress' | 'alibaba' | 'shein';
+  source_platform: 'aliexpress' | 'shein';
   source_url: string | null;
   search_query: string | null;
   category_id: string | null;
@@ -148,8 +265,9 @@ export const apiGetImportJobs = () =>
   api.get('/admin/import-jobs').then(unwrap<ImportJob[]>);
 
 export const apiCreateImportJob = (body: {
-  sourcePlatform: 'aliexpress' | 'alibaba' | 'shein';
+  sourcePlatform: 'aliexpress' | 'shein';
   searchQuery?: string;
   sourceUrl?: string;
   categoryId?: string;
+  maxProducts?: number;
 }) => api.post('/admin/import-jobs', body).then(unwrap<ImportJob>);

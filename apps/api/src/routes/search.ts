@@ -72,11 +72,12 @@ r.get("/suggestions", async (req, res) => {
   if (q.length < 2) return res.json(envelope([]));
 
   const { rows } = await db.query(
-    `SELECT DISTINCT name
+    `SELECT name
      FROM products
      WHERE is_active = true
        AND search_vector @@ plainto_tsquery('english', $1)
-     ORDER BY order_count DESC
+     GROUP BY name
+     ORDER BY max(order_count) DESC
      LIMIT 8`,
     [q],
   );

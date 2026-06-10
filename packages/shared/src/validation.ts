@@ -29,12 +29,24 @@ export const UpdateCartItemSchema = z.object({
 
 // ── Orders ───────────────────────────────────────────────────────────────────
 
+// Checkout is quote → order → pay. The quote re-prices the cart server-side;
+// the order replays the quote's totals. M-Pesa is the only payment method
+// until a card processor lands.
+
+export const CreateQuoteSchema = z.object({
+  promotionCode: z.string().max(50).optional(),
+});
+
 export const CreateOrderSchema = z.object({
+  quoteId: z.string().uuid(),
   deliveryAddressId: z.string().uuid(),
-  paymentMethod: z.enum(["mpesa", "card"]),
-  phone: z.string().optional(),  // M-Pesa phone if different from profile
-  promotionCode: z.string().optional(),
+  paymentMethod: z.enum(["mpesa"]),
   notes: z.string().max(500).optional(),
+});
+
+export const InitiateMpesaSchema = z.object({
+  orderId: z.string().uuid(),
+  phone: z.string().min(9).max(15),
 });
 
 // ── Delivery Addresses ────────────────────────────────────────────────────────
@@ -73,19 +85,22 @@ export const CreateProductSchema = z.object({
   markupPct: z.number().min(0).max(500).optional(),
   estimatedDaysMin: z.number().int().min(1).default(7),
   estimatedDaysMax: z.number().int().min(1).default(14),
-  sourcePlatform: z.enum(["alibaba", "aliexpress", "shein", "manual"]).default("manual"),
+  sourcePlatform: z.enum(["aliexpress", "shein", "manual"]).default("manual"),
   sourceUrl: z.string().url().optional(),
 });
 
 export const UpdateProductSchema = CreateProductSchema.partial();
 
 // ── Admin: Import Job ─────────────────────────────────────────────────────────
+// Alibaba is dropped from the customer-facing pipeline (B2B/MOQ pricing would
+// misquote retail customers).
 
 export const CreateImportJobSchema = z.object({
-  sourcePlatform: z.enum(["alibaba", "aliexpress", "shein"]),
+  sourcePlatform: z.enum(["aliexpress", "shein"]),
   sourceUrl: z.string().url().optional(),
   searchQuery: z.string().optional(),
   categoryId: z.string().uuid().optional(),
+  maxProducts: z.number().int().min(1).max(96).optional(),
 }).refine((d) => d.sourceUrl || d.searchQuery, {
   message: "Either sourceUrl or searchQuery is required",
 });

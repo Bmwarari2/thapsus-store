@@ -1,10 +1,20 @@
 /**
  * Oxylabs Realtime API client.
- * Handles authentication, retries, and rate-limit back-off.
+ * Handles authentication, retries, rate-limit back-off, a daily spend budget
+ * (pricing_config.scrape_daily_budget), and a per-call ledger (scrape_calls).
  */
+
+import { db } from "../db.js";
 
 const OXYLABS_URL = "https://realtime.oxylabs.io/v1/queries";
 const MAX_RETRIES = 3;
+
+export class BudgetExceededError extends Error {
+  constructor(used: number, budget: number) {
+    super(`Daily scrape budget exceeded (${used}/${budget} Oxylabs calls today)`);
+    this.name = "BudgetExceededError";
+  }
+}
 
 function getAuth(): string {
   const user = process.env.OXYLABS_USERNAME;
@@ -17,6 +27,23 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function assertWithinBudget(): Promise<void> {
+  const [{ rows: cfgRows }, { rows: usedRows }] = await Promise.all([
+    db.query(`SELECT value FROM pricing_config WHERE key = 'scrape_daily_budget'`),
+    db.query(`SELECT count(*)::int AS used FROM scrape_calls WHERE created_at >= date_trunc('day', now())`),
+  ]);
+  const budget = Number(cfgRows[0]?.value ?? 400);
+  const used = usedRows[0].used as number;
+  if (used >= budget) throw new BudgetExceededError(used, budget);
+}
+
+async function logCall(source: string, ok: boolean, jobId?: string): Promise<void> {
+  await db.query(
+    `INSERT INTO scrape_calls (provider, source, job_id, ok) VALUES ('oxylabs', $1, $2, $3)`,
+    [source, jobId ?? null, ok],
+  ).catch((err) => console.error("[oxylabs] failed to log scrape call:", err));
+}
+
 export interface OxyResponse {
   results: Array<{
     content: unknown;
@@ -25,7 +52,16 @@ export interface OxyResponse {
   }>;
 }
 
+/** The import job currently running sets this so calls are attributed to it. */
+let currentJobId: string | undefined;
+export function setScrapeJobContext(jobId: string | undefined): void {
+  currentJobId = jobId;
+}
+
 export async function oxyRequest(payload: Record<string, unknown>): Promise<OxyResponse> {
+  await assertWithinBudget();
+
+  const source = String(payload.source ?? "unknown");
   let lastError: Error | null = null;
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -52,7 +88,9 @@ export async function oxyRequest(payload: Record<string, unknown>): Promise<OxyR
         throw new Error(`Oxylabs HTTP ${res.status}: ${text.slice(0, 200)}`);
       }
 
-      return (await res.json()) as OxyResponse;
+      const data = (await res.json()) as OxyResponse;
+      await logCall(source, true, currentJobId);
+      return data;
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       if (attempt < MAX_RETRIES) {
@@ -61,26 +99,8 @@ export async function oxyRequest(payload: Record<string, unknown>): Promise<OxyR
     }
   }
 
+  await logCall(source, false, currentJobId);
   throw lastError ?? new Error("Oxylabs request failed after retries");
-}
-
-// ── Alibaba ───────────────────────────────────────────────────────────────────
-
-export async function fetchAlibabaProduct(url: string): Promise<unknown> {
-  // alibaba_product requires product_id, not url
-  // URL formats: /product-detail/Name_1600123456789.html  or  /product-detail/1600123456789.html
-  const match = url.match(/[_\/](\d{8,})(?:\.html)?/);
-  const productId = match?.[1];
-  if (!productId) throw new Error(`Cannot extract product_id from Alibaba URL: ${url}`);
-  const data = await oxyRequest({ source: "alibaba_product", product_id: productId, parse: true });
-  return data.results[0]?.content ?? null;
-}
-
-export async function fetchAlibabaSearch(query: string): Promise<unknown[]> {
-  // alibaba_search requires query, not url
-  const data = await oxyRequest({ source: "alibaba_search", query, parse: true });
-  const content = data.results[0]?.content as { items?: unknown[] } | null;
-  return content?.items ?? [];
 }
 
 // ── AliExpress ────────────────────────────────────────────────────────────────
@@ -115,21 +135,16 @@ export async function fetchSheinProduct(url: string): Promise<string> {
 }
 
 export async function fetchSheinSearch(query: string): Promise<string> {
-  // Use the UK storefront to match the working product pages.
+  // UK storefront to match the product pages (GBP pricing).
   const searchUrl = `https://www.shein.co.uk/pdsearch/${encodeURIComponent(query)}/`;
 
-  // Attempt 1: rendered HTML (matches the product-page approach).
-  const a = await oxyRequest({ source: "universal", url: searchUrl, render: "html", parse: false });
-  const ra = a.results[0];
-  const ca = (ra?.content as string) ?? "";
-  console.log(`[shein:search:diag] render=html status=${ra?.status_code} len=${ca.length} resp=${JSON.stringify(a).slice(0, 400)}`);
-  if (ca.length > 1000) return ca;
+  // Rendered HTML first; SHEIN also server-renders gbRawData, so fall back to
+  // the raw document when rendering faults (Oxylabs 613).
+  const rendered = await oxyRequest({ source: "universal", url: searchUrl, render: "html", parse: false });
+  const renderedHtml = (rendered.results[0]?.content as string) ?? "";
+  if (renderedHtml.length > 1000) return renderedHtml;
 
-  // Attempt 2: no render — SHEIN server-renders gbRawData, so raw HTML may suffice
-  // and avoids render-time faults (Oxylabs 613).
-  const b = await oxyRequest({ source: "universal", url: searchUrl, parse: false });
-  const rb = b.results[0];
-  const cb = (rb?.content as string) ?? "";
-  console.log(`[shein:search:diag] no-render status=${rb?.status_code} len=${cb.length}`);
-  return cb.length ? cb : ca;
+  const raw = await oxyRequest({ source: "universal", url: searchUrl, parse: false });
+  const rawHtml = (raw.results[0]?.content as string) ?? "";
+  return rawHtml.length ? rawHtml : renderedHtml;
 }

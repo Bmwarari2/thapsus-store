@@ -10,6 +10,7 @@ import { SkeletonCard } from '../../components/shared/SkeletonCard';
 import { useCartStore } from '../../stores/cartStore';
 import { useAuthStore } from '../../stores/authStore';
 import { apiGetProduct, apiAddToCart } from '../../lib/api';
+import { imageAtWidth } from '../../lib/utils';
 import toast from 'react-hot-toast';
 
 export const ProductDetailPage = () => {
@@ -137,8 +138,10 @@ export const ProductDetailPage = () => {
               {images.map((img, idx) => (
                 <div key={idx} className="flex-[0_0_100%] min-w-0 h-full relative group">
                   <img
-                    src={img}
+                    src={imageAtWidth(img, 1280)}
                     alt={`${product.name} ${idx + 1}`}
+                    loading={idx === 0 ? 'eager' : 'lazy'}
+                    decoding="async"
                     className="w-full h-full object-cover transition-transform duration-500 md:group-hover:scale-150 md:origin-center cursor-zoom-in"
                   />
                 </div>
@@ -161,7 +164,7 @@ export const ProductDetailPage = () => {
                     selectedIndex === idx ? 'border-primary' : 'border-transparent opacity-70 hover:opacity-100'
                   }`}
                 >
-                  <img src={img} className="w-full h-full object-cover" alt="" />
+                  <img src={imageAtWidth(img, 320)} loading="lazy" decoding="async" className="w-full h-full object-cover" alt="" />
                 </button>
               ))}
             </div>
@@ -208,14 +211,12 @@ export const ProductDetailPage = () => {
           <div className="mb-6">
             <PriceDisplay
               sellPriceKesCents={product.sellPriceKesCents}
-              showBreakdown={product.sourcePriceUsdCents > 0}
-              breakdown={product.sourcePriceUsdCents > 0 ? {
-                sourcePriceUsdCents: product.sourcePriceUsdCents,
-                shippingFeeKesCents: product.shippingFeeKesCents,
-                taxKesCents: product.taxKesCents,
-              } : undefined}
+              compareAtKesCents={product.compareAtKesCents}
+              size="lg"
             />
-            <p className="text-xs text-textSecondary mt-1">Inclusive of all taxes and import duties.</p>
+            <p className="text-xs text-textSecondary mt-1">
+              Inclusive of all taxes and import duties. Delivery calculated at checkout.
+            </p>
           </div>
 
           <hr className="border-border mb-6" />
