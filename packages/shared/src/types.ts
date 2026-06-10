@@ -18,7 +18,11 @@ export type ImportJobStatus = "queued" | "running" | "done" | "failed" | "skippe
 
 export type ReviewStatus = "pending" | "approved" | "rejected";
 
+// 'alibaba' remains only as a legacy value on old rows — the import pipeline
+// no longer scrapes it.
 export type SourcePlatform = "alibaba" | "aliexpress" | "shein" | "manual";
+
+export type WeightSource = "scraped" | "category_default" | "manual";
 
 export type SourceCurrency = "USD" | "GBP";
 
@@ -35,6 +39,8 @@ export interface ScrapedProduct {
   sourcePriceUsdCents: number; // price in minor units of sourceCurrency (legacy name)
   sourceCurrency?: SourceCurrency; // defaults to USD when omitted
   weightGrams: number;
+  weightSource?: WeightSource;     // 'scraped' when parsed from the source page
+  compareAtCents?: number;         // source list/original price (minor units of sourceCurrency)
   variants: ScrapedVariant[];
   tags: string[];
   brand?: string;
