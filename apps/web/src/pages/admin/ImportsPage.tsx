@@ -11,7 +11,6 @@ import {
 
 const PLATFORMS = [
   { value: 'aliexpress', label: 'AliExpress' },
-  { value: 'alibaba',    label: 'Alibaba' },
   { value: 'shein',      label: 'Shein' },
 ] as const;
 
@@ -36,11 +35,12 @@ function duration(start: string | null, end: string | null) {
 
 export const ImportsPage = () => {
   const queryClient = useQueryClient();
-  const [platform, setPlatform] = useState<'aliexpress' | 'alibaba' | 'shein'>('aliexpress');
+  const [platform, setPlatform] = useState<'aliexpress' | 'shein'>('aliexpress');
   const [mode, setMode] = useState<'search' | 'url'>('search');
   const [searchQuery, setSearchQuery] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
   const [categoryId, setCategoryId] = useState('');
+  const [maxProducts, setMaxProducts] = useState('');
   const [error, setError] = useState('');
 
   const { data: jobs = [], isLoading: jobsLoading } = useQuery({
@@ -83,6 +83,7 @@ export const ImportsPage = () => {
       searchQuery: mode === 'search' ? searchQuery.trim() : undefined,
       sourceUrl: mode === 'url' ? sourceUrl.trim() : undefined,
       categoryId: categoryId || undefined,
+      maxProducts: mode === 'search' && maxProducts ? Number(maxProducts) : undefined,
     });
   };
 
@@ -93,7 +94,7 @@ export const ImportsPage = () => {
       <div className="flex items-center justify-between mb-8">
         <div>
           <h1 className="text-2xl font-bold">Product Imports</h1>
-          <p className="text-textSecondary text-sm mt-1">Scrape products from AliExpress, Alibaba, or Shein into the catalogue</p>
+          <p className="text-textSecondary text-sm mt-1">Scrape products from AliExpress or Shein into the catalogue</p>
         </div>
         {activeJobs.length > 0 && (
           <div className="flex items-center gap-2 text-sm text-blue-600 bg-blue-50 px-4 py-2 rounded-full font-medium">
@@ -160,7 +161,19 @@ export const ImportsPage = () => {
                 placeholder="e.g. women fashion dress, smartphone accessories"
                 className="w-full border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
               />
-              <p className="text-xs text-textSecondary mt-1.5">Returns ~20–40 products per search. Each is fetched individually — expect 5–15 min total.</p>
+              <p className="text-xs text-textSecondary mt-1.5">Each result is fetched individually — expect 5–15 min total. Capped by the max-products setting and the daily scrape budget.</p>
+              <div className="mt-3">
+                <label className="block text-sm font-medium text-textSecondary mb-2">Max products <span className="text-gray-400">(optional, default 24)</span></label>
+                <input
+                  type="number"
+                  min={1}
+                  max={96}
+                  value={maxProducts}
+                  onChange={e => setMaxProducts(e.target.value)}
+                  placeholder="24"
+                  className="w-40 border border-border rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                />
+              </div>
             </div>
           ) : (
             <div>

@@ -148,7 +148,7 @@ export const HomePage = () => {
                 <span className="animate-pulse">🔥</span> Hot picks
               </div>
             </div>
-            <Link to="/products?featured=true" className="text-sm font-semibold text-primary hover:underline">View All</Link>
+            <Link to="/products?sort=popular" className="text-sm font-semibold text-primary hover:underline">View All</Link>
           </div>
 
           {loadingFeatured ? (

@@ -208,14 +208,12 @@ export const ProductDetailPage = () => {
           <div className="mb-6">
             <PriceDisplay
               sellPriceKesCents={product.sellPriceKesCents}
-              showBreakdown={product.sourcePriceUsdCents > 0}
-              breakdown={product.sourcePriceUsdCents > 0 ? {
-                sourcePriceUsdCents: product.sourcePriceUsdCents,
-                shippingFeeKesCents: product.shippingFeeKesCents,
-                taxKesCents: product.taxKesCents,
-              } : undefined}
+              compareAtKesCents={product.compareAtKesCents}
+              size="lg"
             />
-            <p className="text-xs text-textSecondary mt-1">Inclusive of all taxes and import duties.</p>
+            <p className="text-xs text-textSecondary mt-1">
+              Inclusive of all taxes and import duties. Delivery calculated at checkout.
+            </p>
           </div>
 
           <hr className="border-border mb-6" />
