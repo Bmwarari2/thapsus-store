@@ -3,7 +3,12 @@
  * Falls back to the original URL if R2 is not configured (useful in development).
  */
 
+import { createHash } from "node:crypto";
 import { S3Client, PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
+
+// A real browser UA — image CDNs commonly block obvious bot strings.
+const BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
 let _s3: S3Client | null = null;
 
@@ -22,8 +27,12 @@ function getS3(): S3Client | null {
   return _s3;
 }
 
-function r2Key(productId: string, index: number, ext = "jpg"): string {
-  return `products/${productId}/${index}.${ext}`;
+// Keyed by a hash of the source URL (not gallery position) so re-scrapes with
+// a reordered gallery still hit the skip-if-exists path and never serve the
+// wrong image under an old key.
+function r2Key(productId: string, sourceUrl: string, ext = "jpg"): string {
+  const hash = createHash("sha1").update(sourceUrl).digest("hex").slice(0, 16);
+  return `products/${productId}/${hash}.${ext}`;
 }
 
 function cdnUrl(key: string): string {
@@ -73,7 +82,7 @@ export async function uploadProductImages(
   for (let i = 0; i < sourceUrls.length; i++) {
     const sourceUrl = normalizeImageUrl(sourceUrls[i]);
     const ext = extFromUrl(sourceUrl);
-    const key = r2Key(productId, i, ext);
+    const key = r2Key(productId, sourceUrl, ext);
 
     try {
       // Skip re-upload if already exists
@@ -83,7 +92,11 @@ export async function uploadProductImages(
       }
 
       const res = await fetch(sourceUrl, {
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; ThapsusBot/1.0)" },
+        headers: {
+          "User-Agent": BROWSER_UA,
+          Referer: new URL(sourceUrl).origin + "/",
+          Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
+        },
         signal: AbortSignal.timeout(15_000),
       });
 

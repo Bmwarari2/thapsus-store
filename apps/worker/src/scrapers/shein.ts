@@ -28,11 +28,25 @@ function gbpCents(amount?: unknown): number {
   return Number.isFinite(n) ? Math.round(n * 100) : 0;
 }
 
-/** Brace-match and JSON.parse the real `gbRawData = {...}` assignment. */
-function extractGbRawData(html: string): Record<string, unknown> | null {
-  const m = html.match(/gbRawData\s*=\s*\{/);
+/**
+ * Brace/bracket-match and JSON.parse a `marker = {...}` / `"marker": [...]`
+ * assignment embedded in HTML. Handles nested structures and strings — unlike
+ * a non-greedy regex, which truncates on the first nested closer.
+ */
+function extractJsonAssignment(html: string, marker: RegExp): unknown {
+  const m = html.match(marker);
   if (!m || m.index == null) return null;
-  const start = html.indexOf("{", m.index);
+  const afterMarker = m.index + m[0].length;
+  let start = -1;
+  for (let i = afterMarker - 1; i < html.length; i++) {
+    const c = html[i];
+    if (c === "{" || c === "[") { start = i; break; }
+    if (!/[\s=:]/.test(c)) return null;
+  }
+  if (start === -1) return null;
+
+  const open = html[start];
+  const close = open === "{" ? "}" : "]";
   let depth = 0, inStr = false, esc = false;
   for (let i = start; i < html.length; i++) {
     const c = html[i];
@@ -41,12 +55,17 @@ function extractGbRawData(html: string): Record<string, unknown> | null {
       else if (c === "\\") esc = true;
       else if (c === '"') inStr = false;
     } else if (c === '"') inStr = true;
-    else if (c === "{") depth++;
-    else if (c === "}" && --depth === 0) {
+    else if (c === open) depth++;
+    else if (c === close && --depth === 0) {
       try { return JSON.parse(html.slice(start, i + 1)); } catch { return null; }
     }
   }
   return null;
+}
+
+function extractGbRawData(html: string): Record<string, unknown> | null {
+  const parsed = extractJsonAssignment(html, /gbRawData\s*=\s*\{/);
+  return isObj(parsed) ? parsed : null;
 }
 
 type Node = Record<string, unknown>;
@@ -86,6 +105,11 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
     const pi = isObj(sku0) ? (sku0.priceInfo as Node | undefined) : undefined;
     return gbpCents((pi?.salePrice as Node | undefined)?.amount);
   };
+  const skcRetail = (skc: Node): number => {
+    const sku0 = (skc.sku_list as Node[])[0];
+    const pi = isObj(sku0) ? (sku0.priceInfo as Node | undefined) : undefined;
+    return gbpCents((pi?.retailPrice as Node | undefined)?.amount);
+  };
 
   // Price (GBP) = the default colour (SKC whose goods_id matches the product),
   // else the lowest sale price across colours, else any deep priceInfo node.
@@ -101,6 +125,10 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
     sourcePriceUsdCents = gbpCents((priceNode?.salePrice as Node | undefined)?.amount);
   }
   if (!name || sourcePriceUsdCents === 0) return null; // let the meta fallback try
+
+  // SHEIN's list ("retail") price feeds the strike-through display.
+  const retailCents = matchSkc ? skcRetail(matchSkc) : 0;
+  const compareAtCents = retailCents > sourcePriceUsdCents ? retailCents : undefined;
 
   // Colours: mainSaleAttribute.info[] entries with attr_name "Color".
   const msa = deepFind(gb, (n) =>
@@ -175,8 +203,12 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
     description: $('meta[name="description"]').attr("content") ?? "",
     images,
     sourcePriceUsdCents,
+    compareAtCents,
     sourceCurrency: "GBP",
-    weightGrams: 300, // Shein items are typically light clothing
+    // SHEIN pages don't expose weight — the import job substitutes the
+    // category default; this is just the fallback of last resort.
+    weightGrams: 300,
+    weightSource: "category_default",
     variants,
     stockStatus,
     tags: [],
@@ -252,75 +284,75 @@ export function parseSheinProduct(html: string, sourceUrl: string): ScrapedProdu
     sourcePriceUsdCents: gbpCents(priceMatch?.[0]),
     sourceCurrency: "GBP",
     weightGrams: 300,
+    weightSource: "category_default",
     variants: [],
     tags: [],
   };
 }
 
+interface SheinSearchItem {
+  goods_id?: number | string;
+  goods_name?: string;
+  salePrice?: { amount?: string };
+  goods_img?: string;
+  goods_url_name?: string;
+}
+
+/**
+ * Parse a SHEIN search page. Product lists live in script JSON — either inside
+ * gbRawData or as a standalone "goods_list" assignment. Bracket-matched, never
+ * regexed, so nested arrays don't truncate the list. URLs target the UK
+ * storefront to match GBP pricing.
+ */
 export function parseSheinSearchHtml(html: string): Partial<ScrapedProduct>[] {
-  const $ = cheerio.load(html);
-  const results: Partial<ScrapedProduct>[] = [];
+  let list: SheinSearchItem[] = [];
 
-  // TEMP DIAGNOSTIC: locate the product list on the search page.
+  // Preferred: a product array inside gbRawData (items with goods_id + goods_name).
   const gb = extractGbRawData(html);
-  console.log("[shein:search:diag] len", html.length, "gbRaw", !!gb,
-    "goods_list", html.includes("goods_list"), "goods_id@", html.indexOf("goods_id"));
   if (gb) {
-    console.log("[shein:search:diag] gbRawData keys:", Object.keys(gb).join(","));
-    // Find an array of items that look like products (have goods_id + goods_name).
-    const stack: Array<[unknown, string, number]> = [[gb, "gb", 0]];
-    while (stack.length) {
-      const [node, path, d] = stack.pop()!;
-      if (!node || typeof node !== "object" || d > 8) continue;
-      if (Array.isArray(node)) {
-        const first = node[0];
-        if (isObj(first) && ("goods_id" in first || "goods_name" in first)) {
-          console.log(`[shein:search:diag] product array at ${path} len=${node.length} keys=${Object.keys(first).slice(0, 25).join(",")}`);
-        }
-        node.forEach((v, i) => stack.push([v, `${path}[${i}]`, d + 1]));
-      } else {
-        for (const [k, v] of Object.entries(node)) stack.push([v, `${path}.${k}`, d + 1]);
-      }
-    }
+    const found = deepFindArray(gb, (arr) => {
+      const first = arr[0];
+      return isObj(first) && "goods_id" in first && "goods_name" in first;
+    });
+    if (found) list = found as SheinSearchItem[];
   }
-  const gid = html.indexOf("goods_id");
-  if (gid !== -1) console.log("[shein:search:diag] goods_id ctx:", html.slice(gid - 40, gid + 360).replace(/\s+/g, " "));
 
-  // Shein search results embed product list in script JSON
-  $("script").each((_, el) => {
-    const text = $(el).html() ?? "";
-    if (!text.includes("goods_list")) return;
+  // Fallback: a standalone "goods_list": [...] assignment anywhere in the page.
+  if (!list.length) {
+    const extracted = extractJsonAssignment(html, /"goods_list"\s*:/);
+    if (Array.isArray(extracted)) list = extracted as SheinSearchItem[];
+  }
 
-    const m = text.match(/"goods_list"\s*:\s*(\[[\s\S]*?\])\s*[,}]/);
-    if (!m?.[1]) return;
-
-    try {
-      const list = JSON.parse(m[1]) as Array<{
-        goods_id?: number | string;
-        goods_name?: string;
-        salePrice?: { amount?: string };
-        goods_img?: string;
-        goods_url_name?: string;
-      }>;
-
-      for (const item of list) {
-        if (!item.goods_name) continue;
-        const id = String(item.goods_id ?? "");
-        results.push({
-          sourcePlatform: "shein",
-          sourceUrl: `https://www.shein.com/${item.goods_url_name ?? "product"}-p-${id}.html`,
-          sourceId: id,
-          name: item.goods_name,
-          images: item.goods_img ? [httpsify(item.goods_img)] : [],
-          sourcePriceUsdCents: gbpCents(item.salePrice?.amount),
-          sourceCurrency: "GBP",
-          weightGrams: 300,
-          variants: [],
-          tags: [],
-        });
-      }
-    } catch { /* skip malformed JSON */ }
-  });
-
+  const results: Partial<ScrapedProduct>[] = [];
+  for (const item of list) {
+    if (!item?.goods_name || item.goods_id == null) continue;
+    const id = String(item.goods_id);
+    const urlName = String(item.goods_url_name ?? "product").trim().replace(/\s+/g, "-");
+    results.push({
+      sourcePlatform: "shein",
+      sourceUrl: `https://www.shein.co.uk/${urlName}-p-${id}.html`,
+      sourceId: id,
+      name: item.goods_name,
+      images: item.goods_img ? [httpsify(item.goods_img)] : [],
+      sourcePriceUsdCents: gbpCents(item.salePrice?.amount),
+      sourceCurrency: "GBP",
+      weightGrams: 300,
+      weightSource: "category_default",
+      variants: [],
+      tags: [],
+    });
+  }
   return results;
+}
+
+/** Depth-first search for the first non-empty array matching the predicate. */
+function deepFindArray(root: unknown, pred: (arr: unknown[]) => boolean, maxDepth = 10): unknown[] | null {
+  const stack: Array<[unknown, number]> = [[root, 0]];
+  while (stack.length) {
+    const [node, d] = stack.pop()!;
+    if (!node || typeof node !== "object" || d > maxDepth) continue;
+    if (Array.isArray(node) && node.length && pred(node)) return node;
+    for (const v of Object.values(node as Record<string, unknown>)) stack.push([v, d + 1]);
+  }
+  return null;
 }

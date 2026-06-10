@@ -1,23 +1,32 @@
 /**
  * Import job processor.
  * Handles a single import_jobs row: scrapes products, uploads images,
- * computes pricing, and upserts into the products table.
+ * computes v2 item pricing, and upserts into the products table.
+ *
+ * Invariants:
+ *   • Item prices carry markup (+ duty/VAT when tax-inclusive) only — never
+ *     weight or freight.
+ *   • Upserts are race-free (ON CONFLICT on the source identity) and never
+ *     overwrite admin edits to name/description or per-product markup.
+ *   • Variants are upserted by a stable attribute key; rows missing from a
+ *     fresh scrape are deactivated, never deleted, so carts/orders survive.
+ *   • Search imports are capped by the job's max_products (falling back to
+ *     pricing_config.search_import_max_products).
  */
 
 import type { Job } from "bullmq";
-import type { ScrapedProduct } from "@thapsus/shared";
-import { uniqueSlug, computeProductPrice, parsePricingConfig } from "@thapsus/shared";
+import type { ScrapedProduct, ScrapedVariant } from "@thapsus/shared";
+import { uniqueSlug, computeItemPriceKesCents, parsePricingConfigV2 } from "@thapsus/shared";
 import { db } from "../db.js";
 import { uploadProductImages } from "../images.js";
 import {
-  fetchAlibabaProduct,
-  fetchAlibabaSearch,
   fetchAliExpressProduct,
   fetchAliExpressSearch,
   fetchSheinProduct,
   fetchSheinSearch,
+  setScrapeJobContext,
+  BudgetExceededError,
 } from "../scrapers/oxylabs.js";
-import { parseAlibabaProduct, parseAlibabaSearchItem } from "../scrapers/alibaba.js";
 import { parseAliExpressProduct, parseAliExpressSearchItem } from "../scrapers/aliexpress.js";
 import { parseSheinProduct, parseSheinSearchHtml, sheinColorTargets, sheinSkcImages } from "../scrapers/shein.js";
 
@@ -25,38 +34,65 @@ export interface ImportJobPayload {
   jobId: string;
 }
 
-async function loadPricingConfig() {
-  const { rows } = await db.query(`SELECT key, value FROM pricing_config`);
-  return parsePricingConfig(rows);
+export interface RefreshProductPayload {
+  productId: string;
 }
 
-/** Replace a product's variants with the freshly scraped set (incl. per-variant stock). */
+type PricingConfig = ReturnType<typeof parsePricingConfigV2>;
+
+async function loadPricingConfig(): Promise<PricingConfig> {
+  const { rows } = await db.query(`SELECT key, value FROM pricing_config`);
+  return parsePricingConfigV2(rows);
+}
+
+/** Deterministic variant identity — must match the API's canonicalVariantKey. */
+function canonicalVariantKey(attributes: Record<string, string>): string {
+  const sorted = Object.keys(attributes).sort().map((k) => [k, attributes[k]]);
+  return JSON.stringify(sorted);
+}
+
+/**
+ * Upsert the freshly scraped variant set by stable key. Existing ids are
+ * preserved; keys absent from this scrape are deactivated.
+ */
 async function syncVariants(
   productId: string,
   scraped: ScrapedProduct,
-  breakdown: ReturnType<typeof computeProductPrice>,
-  pricingConfig: ReturnType<typeof parsePricingConfig>,
+  basePriceKesCents: number,
+  config: PricingConfig,
+  markupPct: number,
   imageMap: Map<string, string>,
 ): Promise<void> {
-  await db.query(`DELETE FROM product_variants WHERE product_id = $1`, [productId]);
+  const seenKeys: string[] = [];
 
   for (let i = 0; i < scraped.variants.length; i++) {
-    const v = scraped.variants[i];
+    const v: ScrapedVariant = scraped.variants[i];
+    const key = canonicalVariantKey(v.attributes);
+    if (seenKeys.includes(key)) continue; // duplicate attribute set in scrape
+    seenKeys.push(key);
+
     const variantPrice = v.priceUsdCents != null
-      ? computeProductPrice(v.priceUsdCents, scraped.weightGrams, pricingConfig, scraped.sourceCurrency).totalKesCents
-      : breakdown.totalKesCents;
+      ? computeItemPriceKesCents(v.priceUsdCents, scraped.sourceCurrency ?? "USD", config, markupPct)
+      : basePriceKesCents;
 
     // Point the variant at the R2 copy of its colour image (so it matches the gallery).
     const imageUrl = (v.imageUrl && imageMap.get(v.imageUrl)) || v.imageUrl || null;
 
     await db.query(
       `INSERT INTO product_variants
-         (product_id, attributes, price_delta_kes_cents, stock_qty, image_url, sort_order)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
+         (product_id, attributes, variant_key, price_delta_kes_cents, stock_qty, image_url, sort_order, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+       ON CONFLICT (product_id, variant_key) DO UPDATE
+         SET price_delta_kes_cents = EXCLUDED.price_delta_kes_cents,
+             stock_qty             = EXCLUDED.stock_qty,
+             image_url             = EXCLUDED.image_url,
+             sort_order            = EXCLUDED.sort_order,
+             is_active             = true`,
       [
         productId,
         JSON.stringify(v.attributes),
-        variantPrice - breakdown.totalKesCents,
+        key,
+        variantPrice - basePriceKesCents,
         v.stockQty ?? 0,
         imageUrl,
         i,
@@ -64,9 +100,17 @@ async function syncVariants(
     );
   }
 
+  if (seenKeys.length) {
+    await db.query(
+      `UPDATE product_variants SET is_active = false
+       WHERE product_id = $1 AND NOT (variant_key = ANY($2::text[]))`,
+      [productId, seenKeys],
+    );
+  }
+
   await db.query(
     `UPDATE products SET has_variants = $2 WHERE id = $1`,
-    [productId, scraped.variants.length > 0],
+    [productId, seenKeys.length > 0],
   );
 }
 
@@ -142,32 +186,11 @@ async function scrapeProducts(
   platform: string,
   sourceUrl: string | null,
   searchQuery: string | null,
+  maxProducts: number,
 ): Promise<ScrapedProduct[]> {
   const results: ScrapedProduct[] = [];
 
-  if (platform === "alibaba") {
-    if (sourceUrl) {
-      const content = await fetchAlibabaProduct(sourceUrl);
-      const product = parseAlibabaProduct(content, sourceUrl);
-      if (product) results.push(product);
-      else console.warn(`[import] alibaba product parse returned null for ${sourceUrl}`);
-    } else if (searchQuery) {
-      const items = await fetchAlibabaSearch(searchQuery);
-      console.log(`[import] alibaba search "${searchQuery}" returned ${items.length} raw items`);
-      for (const item of items) {
-        const partial = parseAlibabaSearchItem(item);
-        if (!partial?.sourceUrl) { console.warn(`[import] alibaba search item skipped (no sourceUrl):`, JSON.stringify(item).slice(0, 200)); continue; }
-        try {
-          const content = await fetchAlibabaProduct(partial.sourceUrl);
-          const product = parseAlibabaProduct(content, partial.sourceUrl);
-          if (product) results.push(product);
-          else console.warn(`[import] alibaba product parse returned null for ${partial.sourceUrl}`);
-        } catch (err) {
-          console.warn(`[import] failed to fetch alibaba product ${partial.sourceUrl}:`, err);
-        }
-      }
-    }
-  } else if (platform === "aliexpress") {
+  if (platform === "aliexpress") {
     if (sourceUrl) {
       const content = await fetchAliExpressProduct(sourceUrl);
       const product = parseAliExpressProduct(content, sourceUrl);
@@ -175,16 +198,18 @@ async function scrapeProducts(
       else console.warn(`[import] aliexpress product parse returned null for ${sourceUrl}`);
     } else if (searchQuery) {
       const items = await fetchAliExpressSearch(searchQuery);
-      console.log(`[import] aliexpress search "${searchQuery}" returned ${items.length} raw items`);
+      console.log(`[import] aliexpress search "${searchQuery}" returned ${items.length} raw items (cap ${maxProducts})`);
       for (const item of items) {
+        if (results.length >= maxProducts) break;
         const partial = parseAliExpressSearchItem(item);
-        if (!partial?.sourceUrl) { console.warn(`[import] aliexpress search item skipped (no sourceUrl):`, JSON.stringify(item).slice(0, 200)); continue; }
+        if (!partial?.sourceUrl) continue;
         try {
           const content = await fetchAliExpressProduct(partial.sourceUrl);
           const product = parseAliExpressProduct(content, partial.sourceUrl);
           if (product) results.push(product);
           else console.warn(`[import] aliexpress product parse returned null for ${partial.sourceUrl}`);
         } catch (err) {
+          if (err instanceof BudgetExceededError) throw err;
           console.warn(`[import] failed to fetch aliexpress product ${partial.sourceUrl}:`, err);
         }
       }
@@ -200,8 +225,9 @@ async function scrapeProducts(
     } else if (searchQuery) {
       const html = await fetchSheinSearch(searchQuery);
       const partials = parseSheinSearchHtml(html);
-      console.log(`[import] shein search "${searchQuery}" returned ${partials.length} parsed items`);
+      console.log(`[import] shein search "${searchQuery}" returned ${partials.length} parsed items (cap ${maxProducts})`);
       for (const partial of partials) {
+        if (results.length >= maxProducts) break;
         if (!partial.sourceUrl) continue;
         try {
           const productHtml = await fetchSheinProduct(partial.sourceUrl);
@@ -211,33 +237,50 @@ async function scrapeProducts(
             results.push(product);
           } else console.warn(`[import] shein product parse returned null for ${partial.sourceUrl}`);
         } catch (err) {
+          if (err instanceof BudgetExceededError) throw err;
           console.warn(`[import] failed to fetch shein product ${partial.sourceUrl}:`, err);
         }
       }
     }
+  } else {
+    console.warn(`[import] unsupported platform "${platform}" — alibaba was dropped from the pipeline`);
   }
 
   return results;
 }
 
+/** Resolve the effective weight: scraped wins; otherwise the category default. */
+async function resolveWeight(
+  scraped: ScrapedProduct,
+  categoryId: string | null,
+): Promise<{ weightGrams: number; weightSource: string }> {
+  if (scraped.weightSource === "scraped") {
+    return { weightGrams: scraped.weightGrams, weightSource: "scraped" };
+  }
+  if (categoryId) {
+    const { rows } = await db.query(
+      `SELECT cwd.weight_grams
+       FROM category_weight_defaults cwd
+       JOIN categories c ON c.slug = cwd.category_slug
+       WHERE c.id = $1`,
+      [categoryId],
+    );
+    if (rows[0]) return { weightGrams: Number(rows[0].weight_grams), weightSource: "category_default" };
+  }
+  return { weightGrams: scraped.weightGrams || 500, weightSource: "category_default" };
+}
+
 async function upsertProduct(
   scraped: ScrapedProduct,
   categoryId: string | null,
-  config: ReturnType<typeof parsePricingConfig>,
+  config: PricingConfig,
 ): Promise<{ id: string; isNew: boolean }> {
-  // Check if product already exists by source_id + platform
-  const { rows: existing } = await db.query(
-    `SELECT id FROM products WHERE source_platform = $1 AND source_id = $2`,
-    [scraped.sourcePlatform, scraped.sourceId],
-  );
+  const currency = scraped.sourceCurrency ?? "USD";
+  const { weightGrams, weightSource } = await resolveWeight(scraped, categoryId);
 
-  const pricingConfig = { ...config, markupPct: config.markupPct };
-  const breakdown = computeProductPrice(
-    scraped.sourcePriceUsdCents,
-    scraped.weightGrams,
-    pricingConfig,
-    scraped.sourceCurrency,
-  );
+  const compareAtKes = scraped.compareAtCents
+    ? computeItemPriceKesCents(scraped.compareAtCents, currency, config)
+    : null;
 
   // Resolve or create brand
   let brandId: string | null = null;
@@ -251,58 +294,45 @@ async function upsertProduct(
     brandId = rows[0]?.id ?? null;
   }
 
-  if (existing.length) {
-    // Update existing — refresh price + images, don't overwrite admin edits to name/description
-    const productId = existing[0].id as string;
-
-    // Upload new images if source images changed
-    const cdnImages = await uploadProductImages(productId, scraped.images);
-
-    await db.query(
-      `UPDATE products
-       SET source_price_usd_cents = $2,
-           shipping_fee_kes_cents = $3,
-           tax_kes_cents          = $4,
-           sell_price_kes_cents   = $5,
-           images                 = $6,
-           source_url             = $7,
-           source_currency        = $8,
-           stock_status           = $9,
-           last_scraped_at        = now(),
-           updated_at             = now()
-       WHERE id = $1`,
-      [
-        productId,
-        scraped.sourcePriceUsdCents,
-        Math.round(breakdown.shippingKes * 100),
-        Math.round(breakdown.vatKes * 100),
-        breakdown.totalKesCents,
-        cdnImages,
-        scraped.sourceUrl,
-        scraped.sourceCurrency ?? "USD",
-        scraped.stockStatus ?? "in_stock",
-      ],
-    );
-
-    await syncVariants(productId, scraped, breakdown, pricingConfig, buildImageMap(scraped.images, cdnImages));
-    return { id: productId, isNew: false };
-  }
-
-  // Create new product (use temp ID for image path, then update)
-  const tempId = Math.random().toString(36).slice(2, 12);
-  const cdnImages = await uploadProductImages(tempId, scraped.images);
+  // Race-free upsert on the source identity. On refresh: price/stock/images
+  // and source fields update; admin-owned fields (name, description, category,
+  // markup_pct, manual weight) are preserved. sell_price respects the row's
+  // own markup, recomputed in SQL with the same formula as the engine.
   const slug = uniqueSlug(scraped.name);
+  const defaultPrice = computeItemPriceKesCents(scraped.sourcePriceUsdCents, currency, config);
 
-  const { rows: [newProduct] } = await db.query(
+  const { rows: [row] } = await db.query(
     `INSERT INTO products (
        name, slug, description, category_id, brand_id, tags, images,
        source_platform, source_url, source_id,
        source_price_usd_cents, source_currency, markup_pct,
-       shipping_fee_kes_cents, tax_kes_cents, sell_price_kes_cents,
+       sell_price_kes_cents, compare_at_kes_cents,
+       weight_grams, weight_source,
        estimated_days_min, estimated_days_max, stock_status,
        last_scraped_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,now())
-     RETURNING id`,
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,now())
+     ON CONFLICT (source_platform, source_id) DO UPDATE SET
+       source_price_usd_cents = EXCLUDED.source_price_usd_cents,
+       source_currency        = EXCLUDED.source_currency,
+       source_url             = EXCLUDED.source_url,
+       sell_price_kes_cents   = ceil(
+         EXCLUDED.source_price_usd_cents
+         * (CASE WHEN EXCLUDED.source_currency = 'GBP' THEN $21::numeric ELSE $22::numeric END)
+         * (1 + $23::numeric / 100)
+         * (1 + products.markup_pct / 100)
+         * $24::numeric
+         / ($25::numeric * 100)
+       ) * ($25::numeric * 100),
+       compare_at_kes_cents   = EXCLUDED.compare_at_kes_cents,
+       images                 = EXCLUDED.images,
+       stock_status           = EXCLUDED.stock_status,
+       weight_grams           = CASE WHEN products.weight_source = 'manual'
+                                     THEN products.weight_grams ELSE EXCLUDED.weight_grams END,
+       weight_source          = CASE WHEN products.weight_source = 'manual'
+                                     THEN 'manual' ELSE EXCLUDED.weight_source END,
+       last_scraped_at        = now(),
+       updated_at             = now()
+     RETURNING id, markup_pct, sell_price_kes_cents, (xmax = 0) AS is_new`,
     [
       scraped.name,
       slug,
@@ -310,27 +340,49 @@ async function upsertProduct(
       categoryId,
       brandId,
       scraped.tags,
-      cdnImages,
+      scraped.images, // replaced with CDN URLs below, once the real id exists
       scraped.sourcePlatform,
       scraped.sourceUrl,
       scraped.sourceId,
       scraped.sourcePriceUsdCents,
-      scraped.sourceCurrency ?? "USD",
+      currency,
       config.markupPct,
-      Math.round(breakdown.shippingKes * 100),
-      Math.round(breakdown.vatKes * 100),
-      breakdown.totalKesCents,
+      defaultPrice,
+      compareAtKes,
+      weightGrams,
+      weightSource,
       7,
       14,
       scraped.stockStatus ?? "in_stock",
+      config.gbpToKesRate,
+      config.usdToKesRate,
+      config.fxBufferPct,
+      config.taxInclusivePricing
+        ? (1 + config.importDutyPct / 100) * (1 + config.vatPct / 100)
+        : 1,
+      config.priceRoundToKes,
     ],
   );
 
-  const productId = newProduct.id as string;
+  const productId = row.id as string;
+  const isNew = row.is_new as boolean;
+  const rowMarkup = Number(row.markup_pct);
+  const basePrice = Number(row.sell_price_kes_cents);
 
-  await syncVariants(productId, scraped, breakdown, pricingConfig, buildImageMap(scraped.images, cdnImages));
+  // Upload images under the REAL product id (no temp keys), then swap the URLs in.
+  const cdnImages = await uploadProductImages(productId, scraped.images);
+  await db.query(`UPDATE products SET images = $2 WHERE id = $1`, [productId, cdnImages]);
 
-  return { id: productId, isNew: true };
+  await syncVariants(
+    productId,
+    scraped,
+    basePrice,
+    config,
+    rowMarkup,
+    buildImageMap(scraped.images, cdnImages),
+  );
+
+  return { id: productId, isNew };
 }
 
 export async function processImportJob(job: Job<ImportJobPayload>): Promise<void> {
@@ -347,15 +399,22 @@ export async function processImportJob(job: Job<ImportJobPayload>): Promise<void
   );
 
   const config = await loadPricingConfig();
+  const { rows: capRows } = await db.query(
+    `SELECT value FROM pricing_config WHERE key = 'search_import_max_products'`,
+  );
+  const maxProducts = Number(importJob.max_products ?? capRows[0]?.value ?? 24);
+
   let productsFound = 0;
   let productsAdded = 0;
   let productsUpdated = 0;
 
+  setScrapeJobContext(jobId);
   try {
     const scraped = await scrapeProducts(
       importJob.source_platform,
       importJob.source_url,
       importJob.search_query,
+      maxProducts,
     );
 
     productsFound = scraped.length;
@@ -394,5 +453,30 @@ export async function processImportJob(job: Job<ImportJobPayload>): Promise<void
       [jobId, message],
     );
     throw err; // Let BullMQ know the job failed so it can retry
+  } finally {
+    setScrapeJobContext(undefined);
   }
+}
+
+/**
+ * Refresh a single product in place (enqueued by the API when a PDP serves
+ * stale data). Reuses the single-URL import path; no import_jobs row.
+ */
+export async function processRefreshProduct(job: Job<RefreshProductPayload>): Promise<void> {
+  const { productId } = job.data;
+  const { rows } = await db.query(
+    `SELECT id, source_platform, source_url, category_id FROM products WHERE id = $1 AND is_active = true`,
+    [productId],
+  );
+  const product = rows[0];
+  if (!product?.source_url || !["aliexpress", "shein"].includes(product.source_platform)) return;
+
+  const config = await loadPricingConfig();
+  const scraped = await scrapeProducts(product.source_platform, product.source_url, null, 1);
+  if (!scraped.length) {
+    console.warn(`[refresh] no data for product ${productId} (${product.source_url})`);
+    return;
+  }
+  await upsertProduct(scraped[0], product.category_id, config);
+  console.log(`[refresh] product ${productId} refreshed`);
 }
