@@ -163,34 +163,33 @@ WITH cfg AS (
     max(value::numeric) FILTER (WHERE key = 'price_round_to_kes') AS round_kes,
     max(value)          FILTER (WHERE key = 'tax_inclusive_pricing') AS tax_incl
   FROM pricing_config
-)
-UPDATE products p
-SET sell_price_kes_cents = calc.new_price,
-    updated_at = now()
-FROM cfg
-CROSS JOIN LATERAL (
-  SELECT
-    COALESCE(h.duty_pct,   cfg.duty) AS duty,
-    COALESCE(h.vat_pct,    cfg.vat)  AS vat,
-    COALESCE(h.excise_pct, 0)        AS excise
-  FROM (SELECT 1) AS one
-  LEFT JOIN categories c ON c.id = p.category_id
-  LEFT JOIN hs_tax_categories h
-    ON h.id = COALESCE(p.hs_tax_category_id, c.default_hs_tax_category_id)
-) rates
-CROSS JOIN LATERAL (
-  SELECT ceil(
+),
+calc AS (
+  SELECT p.id,
+    ceil(
       p.source_price_usd_cents
       * (CASE WHEN p.source_currency = 'GBP' THEN cfg.gbp ELSE cfg.usd END)
       * (1 + COALESCE(cfg.fxbuf, 0) / 100)
       * (1 + COALESCE(p.markup_pct, cfg.markup) / 100)
       * (CASE WHEN COALESCE(cfg.tax_incl, 'true') = 'true'
-              THEN (1 + rates.duty / 100) * (1 + rates.excise / 100) * (1 + rates.vat / 100)
+              THEN (1 + COALESCE(h.duty_pct, cfg.duty) / 100)
+                   * (1 + COALESCE(h.excise_pct, 0) / 100)
+                   * (1 + COALESCE(h.vat_pct, cfg.vat) / 100)
                    + (COALESCE(cfg.idf, 0) + COALESCE(cfg.rdl, 0)) / 100
               ELSE 1 END)
       / (COALESCE(cfg.round_kes, 10) * 100)
     ) * (COALESCE(cfg.round_kes, 10) * 100) AS new_price
-) calc
-WHERE p.is_active = true AND p.source_price_usd_cents > 0
+  FROM products p
+  CROSS JOIN cfg
+  LEFT JOIN categories c ON c.id = p.category_id
+  LEFT JOIN hs_tax_categories h
+    ON h.id = COALESCE(p.hs_tax_category_id, c.default_hs_tax_category_id)
+  WHERE p.is_active = true AND p.source_price_usd_cents > 0
+)
+UPDATE products p
+SET sell_price_kes_cents = calc.new_price,
+    updated_at = now()
+FROM calc
+WHERE p.id = calc.id
   AND p.sell_price_kes_cents <> calc.new_price
 `;
