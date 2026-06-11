@@ -7,11 +7,14 @@ import {
   Pencil,
   RefreshCw,
   Search,
+  Trash2,
   X,
 } from 'lucide-react';
+import toast from 'react-hot-toast';
 import { Button } from '../../components/ui/Button';
 import { formatKes, imageAtWidth } from '../../lib/utils';
 import {
+  apiAdminDeleteProduct,
   apiAdminGetProducts,
   apiAdminRepriceAll,
   apiAdminUpdateProduct,
@@ -209,6 +212,23 @@ export const ProductsPage = () => {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['admin-products'] }),
   });
 
+  const { mutate: deleteProduct } = useMutation({
+    mutationFn: apiAdminDeleteProduct,
+    onSuccess: (r) => {
+      toast.success(r.deleted
+        ? 'Product permanently deleted.'
+        : 'Product has past orders, so it was hidden from the store instead (order history kept).');
+      queryClient.invalidateQueries({ queryKey: ['admin-products'] });
+    },
+    onError: () => toast.error('Failed to delete product.'),
+  });
+
+  const confirmDelete = (p: AdminProduct) => {
+    if (window.confirm(`Delete "${p.name}"?\n\nThis permanently removes it (or hides it if it has past orders).`)) {
+      deleteProduct(p.id);
+    }
+  };
+
   const products = data?.products ?? [];
   const total = data?.total ?? 0;
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
@@ -335,13 +355,20 @@ export const ProductsPage = () => {
                         {p.isActive ? 'Active' : 'Hidden'}
                       </span>
                     </td>
-                    <td className="px-4 py-3 text-right">
+                    <td className="px-4 py-3 text-right whitespace-nowrap">
                       <button
                         onClick={() => setEditing(p)}
                         className="p-2 hover:bg-surface rounded-lg text-textSecondary hover:text-textPrimary transition-colors"
                         title="Edit product"
                       >
                         <Pencil size={15} />
+                      </button>
+                      <button
+                        onClick={() => confirmDelete(p)}
+                        className="p-2 hover:bg-red-50 rounded-lg text-textSecondary hover:text-red-500 transition-colors"
+                        title="Delete product"
+                      >
+                        <Trash2 size={15} />
                       </button>
                     </td>
                   </tr>

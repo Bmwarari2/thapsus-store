@@ -8,6 +8,7 @@ import { Button } from '../ui/Button';
 import { PriceDisplay } from './PriceDisplay';
 import { useCartStore } from '../../stores/cartStore';
 import { useAuthStore } from '../../stores/authStore';
+import { useWishlist } from '../../hooks/useWishlist';
 import { apiAddToCart, type Product } from '../../lib/api';
 import { imageSrcSet } from '../../lib/utils';
 import toast from 'react-hot-toast';
@@ -17,7 +18,8 @@ interface ProductCardProps {
 }
 
 export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
-  const [isWishlisted, setIsWishlisted] = useState(false);
+  const { isWishlisted: inWishlist, toggle: toggleWishlist } = useWishlist();
+  const isWishlisted = inWishlist(product.id);
   const [isAdding, setIsAdding] = useState(false);
   const [added, setAdded] = useState(false);
   const navigate = useNavigate();
@@ -59,7 +61,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({ product }) => {
   const handleWishlist = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    setIsWishlisted(!isWishlisted);
+    toggleWishlist(product.id);
   };
 
   const isNew = new Date().getTime() - new Date(product.createdAt).getTime() < 7 * 24 * 60 * 60 * 1000;

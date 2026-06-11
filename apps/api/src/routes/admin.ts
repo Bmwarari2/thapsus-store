@@ -105,9 +105,16 @@ r.patch("/products/:id", async (req, res) => {
   return res.json(envelope(updated));
 });
 
+// Default: deactivate (hide from store, keep history). ?hard=true attempts a
+// permanent delete; products that appear in any order fall back to deactivation
+// (order history must survive).
 r.delete("/products/:id", async (req, res) => {
+  if (req.query.hard === "true") {
+    const deleted = await products.hardDelete(req.params.id);
+    if (deleted) return res.json(envelope({ deleted: true }));
+  }
   await products.update(req.params.id, { isActive: false });
-  return res.json(envelope({ deactivated: true }));
+  return res.json(envelope({ deleted: false, deactivated: true }));
 });
 
 r.post("/products/:id/variants", async (req, res) => {
@@ -197,12 +204,27 @@ r.put("/products/:id/hs-tax-category", async (req, res) => {
 // ── Orders ────────────────────────────────────────────────────────────────────
 
 r.get("/orders", async (req, res) => {
-  const { status, page } = req.query as Record<string, string>;
+  const { status, page, user } = req.query as Record<string, string>;
   const result = await orders.listAll({
     status: status as OrderStatus | undefined,
+    userId: user || undefined,
     page: Number(page ?? 1),
   });
   return res.json(envelope(result));
+});
+
+r.get("/orders/:id", async (req, res) => {
+  const order = await orders.findById(req.params.id);
+  if (!order) return res.status(404).json(errorEnvelope("not_found", "Order not found"));
+  const [items, { rows: userRows }] = await Promise.all([
+    orders.getItems(order.id),
+    db.query(`SELECT full_name, email, phone FROM users WHERE id = $1`, [order.userId]),
+  ]);
+  return res.json(envelope({
+    order,
+    items,
+    customer: userRows[0] ?? null,
+  }));
 });
 
 r.patch("/orders/:id/status", async (req, res) => {
@@ -260,6 +282,46 @@ r.patch("/orders/:id/status", async (req, res) => {
   );
 
   return res.json(envelope(updated));
+});
+
+// ── Customers ─────────────────────────────────────────────────────────────────
+// Who has ordered what: list customers with order/spend stats; drill into a
+// customer's orders via GET /orders?user=<id>.
+
+r.get("/customers", async (req, res) => {
+  const { q, page } = req.query as Record<string, string>;
+  const pageNum = Math.max(1, Number(page ?? 1));
+  const limit = 25;
+  const params: unknown[] = [];
+  let pi = 1;
+
+  let where = `WHERE u.role = 'customer'`;
+  if (q?.trim()) {
+    params.push(`%${q.trim()}%`);
+    where += ` AND (u.full_name ILIKE $${pi} OR u.email ILIKE $${pi} OR u.phone ILIKE $${pi})`;
+    pi++;
+  }
+
+  params.push(limit, (pageNum - 1) * limit);
+  const { rows } = await db.query(
+    `SELECT u.id, u.full_name, u.email, u.phone, u.created_at, u.is_active,
+            count(o.id)::int AS order_count,
+            COALESCE(sum(o.total_cents) FILTER (WHERE o.paid_at IS NOT NULL
+              AND o.status NOT IN ('cancelled','refunded')), 0) AS total_spent_cents,
+            max(o.created_at) AS last_order_at
+     FROM users u
+     LEFT JOIN orders o ON o.user_id = u.id
+     ${where}
+     GROUP BY u.id
+     ORDER BY order_count DESC, u.created_at DESC
+     LIMIT $${pi++} OFFSET $${pi++}`,
+    params,
+  );
+  const { rows: countRows } = await db.query(
+    `SELECT count(*)::int AS total FROM users u ${where}`,
+    params.slice(0, -2),
+  );
+  return res.json(envelope({ customers: rows, total: countRows[0].total }));
 });
 
 // ── Purchasing (fulfilment report) ───────────────────────────────────────────
@@ -387,8 +449,31 @@ r.get("/import-jobs", async (_req, res) => {
   return res.json(envelope(rows));
 });
 
+// Admins routinely paste a product URL into the search box (and sometimes
+// under the wrong platform tab) — both used to fail deep in the worker.
+// Normalize before validation: a URL in searchQuery becomes sourceUrl, and
+// the platform is corrected to match the URL's host.
+function normalizeImportJobBody(body: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...body };
+  if (typeof out.searchQuery === "string" && /^https?:\/\//i.test(out.searchQuery.trim())) {
+    out.sourceUrl = out.searchQuery.trim();
+    delete out.searchQuery;
+  }
+  if (typeof out.sourceUrl === "string") {
+    const host = out.sourceUrl.match(/^https?:\/\/([^/?#]+)/i)?.[1] ?? "";
+    for (const [platform, re] of Object.entries({
+      shein: /(^|\.)shein\./i,
+      aliexpress: /(^|\.)aliexpress\./i,
+      amazon: /(^|\.)amazon\./i,
+    })) {
+      if (re.test(host)) { out.sourcePlatform = platform; break; }
+    }
+  }
+  return out;
+}
+
 r.post("/import-jobs", async (req, res) => {
-  const parsed = CreateImportJobSchema.safeParse(req.body);
+  const parsed = CreateImportJobSchema.safeParse(normalizeImportJobBody(req.body ?? {}));
   if (!parsed.success) {
     return res.status(400).json(errorEnvelope("validation", "Invalid job params", parsed.error.flatten()));
   }

@@ -16,6 +16,8 @@ const NAV_LINKS = [
 
 export const Header = () => {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchText, setSearchText] = useState('');
   const cartItemCount = useCartStore(state => state.itemCount);
   const user = useAuthStore(state => state.user);
   const logout = useAuthStore(state => state.logout);
@@ -27,6 +29,15 @@ export const Header = () => {
     setItemCount(0);
     setMenuOpen(false);
     navigate('/');
+  };
+
+  const submitSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = searchText.trim();
+    if (!q) return;
+    setSearchOpen(false);
+    setMenuOpen(false);
+    navigate(`/products?q=${encodeURIComponent(q)}`);
   };
 
   return (
@@ -61,16 +72,22 @@ export const Header = () => {
 
           {/* Right Actions */}
           <div className="flex items-center gap-2 sm:gap-4">
-            <div className="hidden md:block relative">
+            <form onSubmit={submitSearch} className="hidden md:block relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-textSecondary" />
               <input
-                type="text"
+                type="search"
+                value={searchText}
+                onChange={e => setSearchText(e.target.value)}
                 placeholder="Search products..."
                 className="bg-surface border-none rounded-full h-10 pl-10 pr-4 text-sm focus:ring-2 focus:ring-primary focus:bg-white transition-all w-[200px] lg:w-[300px]"
               />
-            </div>
+            </form>
 
-            <button className="md:hidden p-2 text-textPrimary hover:bg-surface rounded-full">
+            <button
+              onClick={() => setSearchOpen(o => !o)}
+              className="md:hidden p-2 text-textPrimary hover:bg-surface rounded-full"
+              aria-label="Search"
+            >
               <Search size={22} />
             </button>
 
@@ -99,6 +116,31 @@ export const Header = () => {
             </button>
           </div>
         </div>
+
+        {/* Mobile search bar (toggled by the magnifier) */}
+        <AnimatePresence>
+          {searchOpen && (
+            <motion.form
+              onSubmit={submitSearch}
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              className="md:hidden overflow-hidden border-t border-border bg-white"
+            >
+              <div className="relative px-4 py-3">
+                <Search className="absolute left-7 top-1/2 -translate-y-1/2 w-4 h-4 text-textSecondary" />
+                <input
+                  type="search"
+                  autoFocus
+                  value={searchText}
+                  onChange={e => setSearchText(e.target.value)}
+                  placeholder="Search products..."
+                  className="w-full bg-surface border-none rounded-full h-10 pl-10 pr-4 text-sm focus:ring-2 focus:ring-primary focus:bg-white"
+                />
+              </div>
+            </motion.form>
+          )}
+        </AnimatePresence>
       </header>
 
       {/* Mobile Drawer */}

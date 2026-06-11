@@ -6,7 +6,7 @@ import { db } from "../db.js";
 
 const r = Router();
 
-const FEED_SORTS = new Set(["newest", "popular", "price_asc", "price_desc"]);
+const FEED_SORTS = new Set(["newest", "popular", "price_asc", "price_desc", "recommended"]);
 const LIST_SORTS = new Set(["newest", "popular", "price_asc", "price_desc", "rating"]);
 
 /**
@@ -14,7 +14,7 @@ const LIST_SORTS = new Set(["newest", "popular", "price_asc", "price_desc", "rat
  * concurrent imports. `cursor` is opaque — pass back `nextCursor` verbatim.
  */
 r.get("/feed", async (req, res) => {
-  const { category, q, min_price, max_price, sort, limit, cursor } = req.query as Record<string, string>;
+  const { category, q, min_price, max_price, sort, limit, cursor, seed } = req.query as Record<string, string>;
 
   const result = await products.feed({
     categorySlug: category || undefined,
@@ -23,6 +23,37 @@ r.get("/feed", async (req, res) => {
     maxPriceCents: max_price ? Number(max_price) * 100 : undefined,
     sort: (FEED_SORTS.has(sort) ? sort : "newest") as products.FeedSort,
     limit: Math.min(Math.max(Number(limit) || 24, 1), 48),
+    cursor: cursor || undefined,
+    seed: seed?.slice(0, 64) || undefined,
+  });
+
+  return res.json(envelope({
+    items: result.products.map(products.toPublicProduct),
+    nextCursor: result.nextCursor,
+  }));
+});
+
+/**
+ * "You may also like" feed for a product page: same category (falling back to
+ * the whole catalogue), recommended ordering seeded by the product id so the
+ * list is stable while the customer scrolls, the product itself excluded.
+ */
+r.get("/:slug/related", async (req, res) => {
+  const { cursor, limit } = req.query as Record<string, string>;
+  const { rows } = await db.query(
+    `SELECT p.id, c.slug AS category_slug
+     FROM products p LEFT JOIN categories c ON c.id = p.category_id
+     WHERE p.slug = $1 AND p.is_active = true`,
+    [req.params.slug],
+  );
+  if (!rows[0]) return res.status(404).json(errorEnvelope("not_found", "Product not found"));
+
+  const result = await products.feed({
+    categorySlug: (rows[0].category_slug as string | null) ?? undefined,
+    sort: "recommended",
+    seed: rows[0].id as string,
+    excludeId: rows[0].id as string,
+    limit: Math.min(Math.max(Number(limit) || 12, 1), 48),
     cursor: cursor || undefined,
   });
 

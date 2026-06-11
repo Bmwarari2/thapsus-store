@@ -26,6 +26,8 @@ export interface Product {
   orderCount: number;
   rating: number | null;
   reviewCount: number;
+  sourceRating: number | null;
+  sourceReviewCount: number | null;
   isActive: boolean;
   isFeatured: boolean;
   estimatedDaysMin: number;
@@ -69,8 +71,9 @@ export function toPublicProduct(p: Product): PublicProduct {
     compareAtKesCents: p.compareAtKesCents,
     hasVariants: p.hasVariants,
     stockStatus: p.stockStatus,
-    rating: p.rating,
-    reviewCount: p.reviewCount,
+    // Local approved reviews take precedence; else show the source site's stars.
+    rating: p.rating ?? p.sourceRating,
+    reviewCount: p.reviewCount || p.sourceReviewCount || 0,
     estimatedDaysMin: p.estimatedDaysMin,
     estimatedDaysMax: p.estimatedDaysMax,
     isFeatured: p.isFeatured,
@@ -117,6 +120,8 @@ function mapProduct(row: Record<string, unknown>): Product {
     orderCount: Number(row.order_count),
     rating: row.rating != null ? Number(row.rating) : null,
     reviewCount: Number(row.review_count),
+    sourceRating: row.source_rating != null ? Number(row.source_rating) : null,
+    sourceReviewCount: row.source_review_count != null ? Number(row.source_review_count) : null,
     isActive: row.is_active as boolean,
     isFeatured: row.is_featured as boolean,
     estimatedDaysMin: Number(row.estimated_days_min),
@@ -217,7 +222,7 @@ export async function list(opts: ListProductsOptions = {}): Promise<{ products: 
 
 // ── Keyset feed (infinite scroll) ─────────────────────────────────────────────
 
-export type FeedSort = "newest" | "popular" | "price_asc" | "price_desc";
+export type FeedSort = "newest" | "popular" | "price_asc" | "price_desc" | "recommended";
 
 export interface FeedOptions {
   limit: number;
@@ -227,6 +232,10 @@ export interface FeedOptions {
   search?: string;
   minPriceCents?: number;
   maxPriceCents?: number;
+  /** Shuffle seed for the "recommended" sort — same seed ⇒ stable pagination. */
+  seed?: string;
+  /** Exclude one product (e.g. the PDP's own product from its related feed). */
+  excludeId?: string;
 }
 
 interface FeedSortSpec {
@@ -235,7 +244,7 @@ interface FeedSortSpec {
   cast: "string" | "number";
 }
 
-const FEED_SORTS: Record<FeedSort, FeedSortSpec> = {
+const FEED_SORTS: Record<Exclude<FeedSort, "recommended">, FeedSortSpec> = {
   newest:     { column: "p.created_at",           direction: "DESC", cast: "string" },
   popular:    { column: "p.order_count",          direction: "DESC", cast: "number" },
   price_asc:  { column: "p.sell_price_kes_cents", direction: "ASC",  cast: "number" },
@@ -261,13 +270,34 @@ function decodeCursor(cursor: string): [unknown, string] | null {
  * at any depth, no count(*). Returns limit items + the cursor for the next page.
  */
 export async function feed(opts: FeedOptions): Promise<{ products: Product[]; nextCursor: string | null }> {
-  const spec = FEED_SORTS[opts.sort] ?? FEED_SORTS.newest;
-  const cmp = spec.direction === "DESC" ? "<" : ">";
-
   const conditions: string[] = ["p.is_active = true"];
   const params: unknown[] = [];
   let pi = 1;
 
+  // "recommended": popularity-weighted deterministic shuffle. Each item's score
+  // is log-popularity plus a per-seed pseudo-random jitter in [0,1) — sellers
+  // and frequently-viewed items float up, but every seed deals a fresh order.
+  // The seed is part of the score expression, so cursors paginate stably.
+  let spec: FeedSortSpec;
+  if (opts.sort === "recommended") {
+    params.push(opts.seed ?? new Date().toISOString().slice(0, 10));
+    const seedRef = `$${pi++}::text`;
+    spec = {
+      column:
+        `(ln(1 + p.order_count * 5 + p.view_count)` +
+        ` + (('x' || substr(md5(${seedRef} || p.id::text), 1, 8))::bit(32)::int / 4294967296.0 + 0.5))`,
+      direction: "DESC",
+      cast: "number",
+    };
+  } else {
+    spec = FEED_SORTS[opts.sort as Exclude<FeedSort, "recommended">] ?? FEED_SORTS.newest;
+  }
+  const cmp = spec.direction === "DESC" ? "<" : ">";
+
+  if (opts.excludeId) {
+    params.push(opts.excludeId);
+    conditions.push(`p.id <> $${pi++}::uuid`);
+  }
   if (opts.categorySlug) {
     params.push(opts.categorySlug);
     conditions.push(`c.slug = $${pi++}`);
@@ -296,7 +326,7 @@ export async function feed(opts: FeedOptions): Promise<{ products: Product[]; ne
 
   params.push(opts.limit + 1);
   const { rows } = await db.query(
-    `SELECT p.* FROM products p
+    `SELECT p.*, ${spec.column} AS __feed_sort_value FROM products p
      LEFT JOIN categories c ON c.id = p.category_id
      WHERE ${conditions.join(" AND ")}
      ORDER BY ${spec.column} ${spec.direction}, p.id ${spec.direction}
@@ -311,8 +341,7 @@ export async function feed(opts: FeedOptions): Promise<{ products: Product[]; ne
   let nextCursor: string | null = null;
   if (hasMore && pageRows.length) {
     const last = pageRows[pageRows.length - 1] as Record<string, unknown>;
-    const valueCol = spec.column.replace("p.", "");
-    const raw = last[valueCol];
+    const raw = last.__feed_sort_value;
     const value = raw instanceof Date ? raw.toISOString() : spec.cast === "number" ? Number(raw) : String(raw);
     nextCursor = encodeCursor(value, String(last.id));
   }
@@ -454,6 +483,22 @@ export async function update(
     params,
   );
   return rows[0] ? mapProduct(rows[0]) : null;
+}
+
+/**
+ * Permanently delete a product. Variants/cart/wishlist lines cascade, but
+ * order_items.product_id deliberately RESTRICTs — a product that has ever
+ * been ordered can't be hard-deleted (order history must survive). In that
+ * case this returns false and callers fall back to deactivation.
+ */
+export async function hardDelete(id: string): Promise<boolean> {
+  try {
+    const { rowCount } = await db.query(`DELETE FROM products WHERE id = $1`, [id]);
+    return (rowCount ?? 0) > 0;
+  } catch (err) {
+    console.warn(`[products] hard delete failed for ${id}, falling back to deactivate:`, err);
+    return false;
+  }
 }
 
 export async function addVariant(

@@ -8,6 +8,7 @@
  */
 
 import type { ScrapedProduct, ScrapedVariant } from "@thapsus/shared";
+import { parseStars } from "./amazon.js";
 
 interface SkuPropValue {
   name?: string;
@@ -55,6 +56,10 @@ interface AliExpressContent {
   variations?: SkuEntry[];
   shipping?: { weight?: string };
   specifications?: Array<{ name?: string; value?: string }>;
+  rating?: number | string;
+  reviews?: number | string;
+  reviews_count?: number | string;
+  orders_count?: number | string;
 }
 
 function parseWeight(raw?: string): number | null {
@@ -263,6 +268,7 @@ export function parseAliExpressProduct(content: unknown, sourceUrl: string): Scr
     variants,
     tags,
     brand: c.store?.name,
+    ...parseStars(c.rating, c.reviews_count ?? c.reviews),
   };
 }
 

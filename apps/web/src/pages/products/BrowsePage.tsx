@@ -10,6 +10,7 @@ import { useInfiniteProducts } from '../../hooks/useInfiniteProducts';
 import { useIntersection } from '../../hooks/useIntersection';
 
 const SORT_OPTIONS = [
+  { label: 'Recommended', value: 'recommended' },
   { label: 'Newest', value: 'newest' },
   { label: 'Popular', value: 'popular' },
   { label: 'Price: Low to High', value: 'price_asc' },
@@ -24,7 +25,8 @@ export const BrowsePage = () => {
 
   const category = searchParams.get('category') || undefined;
   const q = searchParams.get('q') || undefined;
-  const sort = searchParams.get('sort') || 'newest';
+  // Search results rank by recency; browsing defaults to the recommended shuffle.
+  const sort = searchParams.get('sort') || (q ? 'newest' : 'recommended');
   const minPrice = searchParams.get('min_price') ? Number(searchParams.get('min_price')) : undefined;
   const maxPrice = searchParams.get('max_price') ? Number(searchParams.get('max_price')) : undefined;
 

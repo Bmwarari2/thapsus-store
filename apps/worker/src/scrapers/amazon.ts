@@ -20,9 +20,21 @@ interface AmazonContent {
   brand?: string;
   manufacturer?: string;
   stock?: string;
+  rating?: number | string;
+  reviews_count?: number | string;
   category?: Array<{ ladder?: Array<{ name?: string }> }>;
   product_details?: Record<string, unknown>;
   [key: string]: unknown;
+}
+
+/** Source star rating clamped to 0–5, or undefined when absent/garbage. */
+export function parseStars(rating?: number | string, count?: number | string): { rating?: number; reviewCount?: number } {
+  const r = typeof rating === "string" ? parseFloat(rating) : rating;
+  const n = typeof count === "string" ? parseInt(count.replace(/[,\s]/g, ""), 10) : count;
+  return {
+    rating: Number.isFinite(r) && r! > 0 && r! <= 5 ? Math.round(r! * 10) / 10 : undefined,
+    reviewCount: Number.isFinite(n) && n! >= 0 ? Math.round(n!) : undefined,
+  };
 }
 
 function priceCents(price?: number | string): number {
@@ -131,6 +143,7 @@ export function parseAmazonProduct(content: unknown, sourceUrl: string): Scraped
     tags: categoryTags,
     brand: c.brand ?? c.manufacturer,
     stockStatus: outOfStock ? "out_of_stock" : "in_stock",
+    ...parseStars(c.rating, c.reviews_count),
   };
 }
 

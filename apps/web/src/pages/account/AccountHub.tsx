@@ -1,8 +1,12 @@
 import { Routes, Route, Link, useLocation, useNavigate } from 'react-router-dom';
-import { User, Package, Heart, MapPin, Bell, LogOut } from 'lucide-react';
+import { User, Package, Heart, MapPin, Bell, LogOut, Loader2, Trash2, ChevronRight } from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
 import { useAuthStore } from '../../stores/authStore';
 import { useCartStore } from '../../stores/cartStore';
+import { useWishlist } from '../../hooks/useWishlist';
 import { Button } from '../../components/ui/Button';
+import { apiGetMyOrders } from '../../lib/api';
+import { formatKes, formatDate, imageAtWidth } from '../../lib/utils';
 
 const tabs = [
   { id: 'profile',       icon: User,    label: 'Profile',       path: '/account' },
@@ -26,8 +30,101 @@ const ProfileTab = () => {
   );
 };
 
-const OrdersTab        = () => <div className="p-6 bg-white rounded-2xl border border-border"><h2 className="text-xl font-bold mb-4">Order History</h2><p className="text-textSecondary text-sm">No recent orders found.</p></div>;
-const WishlistTab      = () => <div className="p-6 bg-white rounded-2xl border border-border"><h2 className="text-xl font-bold mb-4">Your Wishlist</h2><p className="text-textSecondary text-sm">Your wishlist is empty.</p></div>;
+/** Human-readable order status chips, matching the OrderDetailPage timeline. */
+const STATUS_LABEL: Record<string, string> = {
+  pending_payment: 'Awaiting Payment',
+  payment_confirmed: 'Payment Confirmed',
+  sourcing: 'Sourcing Item',
+  shipped_to_hub: 'Shipped to Kenya',
+  at_hub: 'Arrived in Kenya',
+  out_for_delivery: 'Out for Delivery',
+  delivered: 'Delivered',
+  cancelled: 'Cancelled',
+  refund_requested: 'Refund Requested',
+  refunded: 'Refunded',
+};
+
+const statusChipClass = (status: string) =>
+  status === 'delivered' ? 'bg-green-100 text-green-700'
+  : ['cancelled', 'refunded', 'refund_requested'].includes(status) ? 'bg-red-100 text-red-600'
+  : 'bg-blue-100 text-blue-700';
+
+const OrdersTab = () => {
+  const { data, isLoading } = useQuery({ queryKey: ['my-orders'], queryFn: () => apiGetMyOrders() });
+  const orders = data?.orders ?? [];
+
+  return (
+    <div className="p-6 bg-white rounded-2xl border border-border">
+      <h2 className="text-xl font-bold mb-4">Order History</h2>
+      {isLoading ? (
+        <div className="py-10 flex justify-center"><Loader2 size={22} className="animate-spin text-textSecondary" /></div>
+      ) : orders.length === 0 ? (
+        <p className="text-textSecondary text-sm">No orders yet. Anything you buy will show up here with its delivery status.</p>
+      ) : (
+        <div className="divide-y divide-border">
+          {orders.map(o => (
+            <Link key={o.id} to={`/orders/${o.id}`} className="flex items-center justify-between gap-4 py-4 group">
+              <div className="min-w-0">
+                <p className="font-semibold text-sm group-hover:text-primary transition-colors">#{o.orderNumber}</p>
+                <p className="text-xs text-textSecondary mt-0.5">{formatDate(o.createdAt)} · {formatKes(o.totalCents)}</p>
+              </div>
+              <div className="flex items-center gap-3 shrink-0">
+                <span className={`px-2.5 py-1 rounded-full text-xs font-semibold ${statusChipClass(o.status)}`}>
+                  {STATUS_LABEL[o.status] ?? o.status}
+                </span>
+                <ChevronRight size={16} className="text-textSecondary" />
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+const WishlistTab = () => {
+  const { items, isLoading, toggle } = useWishlist();
+
+  return (
+    <div className="p-6 bg-white rounded-2xl border border-border">
+      <h2 className="text-xl font-bold mb-4">Your Wishlist</h2>
+      {isLoading ? (
+        <div className="py-10 flex justify-center"><Loader2 size={22} className="animate-spin text-textSecondary" /></div>
+      ) : items.length === 0 ? (
+        <p className="text-textSecondary text-sm">
+          Your wishlist is empty. Tap the ♥ on any product to save it here — it syncs to your account, not this device.
+        </p>
+      ) : (
+        <div className="divide-y divide-border">
+          {items.map(item => (
+            <div key={item.product_id} className="flex items-center gap-4 py-4">
+              <Link to={`/products/${item.slug}`} className="shrink-0">
+                {item.image ? (
+                  <img src={imageAtWidth(item.image, 320)} alt="" className="w-16 h-16 rounded-xl object-cover bg-surface" loading="lazy" />
+                ) : (
+                  <div className="w-16 h-16 rounded-xl bg-surface" />
+                )}
+              </Link>
+              <div className="min-w-0 flex-1">
+                <Link to={`/products/${item.slug}`} className="text-sm font-medium line-clamp-2 hover:text-primary transition-colors">
+                  {item.name}
+                </Link>
+                <p className="text-sm font-bold mt-1">{formatKes(item.sell_price_kes_cents)}</p>
+              </div>
+              <button
+                onClick={() => toggle(item.product_id)}
+                className="p-2 text-textSecondary hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors shrink-0"
+                title="Remove from wishlist"
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 const AddressesTab     = () => <div className="p-6 bg-white rounded-2xl border border-border"><h2 className="text-xl font-bold mb-4">Saved Addresses</h2><p className="text-textSecondary text-sm">No addresses saved.</p></div>;
 const NotificationsTab = () => <div className="p-6 bg-white rounded-2xl border border-border"><h2 className="text-xl font-bold mb-4">Notifications</h2><p className="text-textSecondary text-sm">You're all caught up!</p></div>;
 

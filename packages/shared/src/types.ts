@@ -45,6 +45,8 @@ export interface ScrapedProduct {
   tags: string[];
   brand?: string;
   stockStatus?: StockStatus; // overall availability derived from source stock
+  rating?: number;           // source-site star rating (0–5), when exposed
+  reviewCount?: number;      // source-site review count, when exposed
 }
 
 export interface ScrapedVariant {

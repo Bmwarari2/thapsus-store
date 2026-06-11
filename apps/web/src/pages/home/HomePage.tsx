@@ -51,7 +51,7 @@ export const HomePage = () => {
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
-  } = useInfiniteProducts({ sort: 'newest' });
+  } = useInfiniteProducts({ sort: 'recommended' });
 
   const feedProducts = useMemo(() => {
     const seen = new Set<string>();
@@ -205,11 +205,11 @@ export const HomePage = () => {
           <Button variant="secondary" size="lg" disabled>Coming Soon</Button>
         </section>
 
-        {/* New Arrivals — endless feed, SHEIN-style */}
+        {/* Recommended for you — popularity-weighted shuffled endless feed */}
         <section>
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-2xl font-bold tracking-tight">New Arrivals</h2>
-            <Link to="/products?sort=newest" className="text-sm font-semibold text-primary hover:underline">Browse All</Link>
+            <h2 className="text-2xl font-bold tracking-tight">Recommended For You</h2>
+            <Link to="/products" className="text-sm font-semibold text-primary hover:underline">Browse All</Link>
           </div>
           {loadingFeed ? (
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
