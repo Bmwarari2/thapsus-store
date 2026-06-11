@@ -122,13 +122,34 @@ export async function fetchAliExpressSearch(query: string): Promise<unknown[]> {
     | { products?: unknown[]; results?: unknown[]; items?: unknown[] }
     | null;
   const products = content?.products ?? content?.results ?? content?.items ?? [];
-  if (!products.length && content) {
-    // Payload shape drifted — log the keys so the next failure is diagnosable.
+  if (products.length) return products as unknown[];
+
+  if (content) {
+    // Seen live: the adaptive parser returns ONE product-shaped object
+    // (availability/brand/price/title/url keys) for a search page — no list.
     console.warn(
-      `[oxylabs] aliexpress_search returned no products; content keys: ${Object.keys(content).join(", ")}`,
+      `[oxylabs] aliexpress_search returned no product list (content keys: ${Object.keys(content).join(", ")}) — falling back to rendered search page`,
     );
   }
-  return products;
+
+  // Fallback: render the search page and lift /item/<id>.html links. The ids
+  // are all the import pipeline needs — it fetches each product page (which
+  // parses fine) for the real details.
+  const slug = query.trim().replace(/\s+/g, "-");
+  const searchUrl = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(slug)}.html`;
+  const page = await oxyRequest({ source: "universal", url: searchUrl, render: "html", parse: false });
+  const html = String(page.results[0]?.content ?? "");
+  const ids = [...new Set(Array.from(html.matchAll(/\/item\/(\d{10,})\.html/g), (m) => m[1]))];
+  if (!ids.length) {
+    console.warn(`[oxylabs] aliexpress search fallback found no item links (html ${html.length} bytes)`);
+    return [];
+  }
+  console.log(`[oxylabs] aliexpress search fallback found ${ids.length} item links`);
+  return ids.map((id) => ({
+    product_id: id,
+    product_url: `https://www.aliexpress.com/item/${id}.html`,
+    title: `aliexpress-item-${id}`, // placeholder; the product fetch supplies the real name
+  }));
 }
 
 // ── Amazon (dedicated parsed sources, UK storefront → GBP) ───────────────────
@@ -181,13 +202,22 @@ export function canonicalSheinUrl(url: string): string {
 }
 
 export async function fetchSheinProduct(url: string): Promise<string> {
+  const canonical = canonicalSheinUrl(url);
   const data = await oxyRequest({
     source: "universal",
-    url: canonicalSheinUrl(url),
+    url: canonical,
     render: "html",
     parse: false,
   });
-  return (data.results[0]?.content as string) ?? "";
+  const rendered = (data.results[0]?.content as string) ?? "";
+  if (rendered.length > 1000) return rendered;
+
+  // Rendering sometimes returns an empty document ("html 0 bytes" in the
+  // logs). gbRawData is server-rendered, so a plain fetch usually carries it.
+  console.warn(`[oxylabs] shein render returned ${rendered.length} bytes for ${canonical} — retrying without render`);
+  const raw = await oxyRequest({ source: "universal", url: canonical, parse: false });
+  const rawHtml = (raw.results[0]?.content as string) ?? "";
+  return rawHtml.length > rendered.length ? rawHtml : rendered;
 }
 
 export async function fetchSheinSearch(query: string): Promise<string> {
