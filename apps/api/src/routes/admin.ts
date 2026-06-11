@@ -4,7 +4,7 @@ import { envelope, errorEnvelope, requireAdmin } from "../middleware.js";
 import * as products from "../repos/products.js";
 import * as orders from "../repos/orders.js";
 import * as reviewRepo from "../repos/reviews.js";
-import { priceItem, repriceAllProducts, invalidatePricingCache } from "../services/pricing.js";
+import { hsRatesFor, priceItem, repriceAllProducts, invalidatePricingCache } from "../services/pricing.js";
 import type { SourceCurrency } from "@thapsus/shared";
 import { sendOrderShipped, sendOrderDelivered } from "../services/email.js";
 import { db } from "../db.js";
@@ -34,7 +34,12 @@ r.post("/products", async (req, res) => {
   }
   const d = parsed.data;
 
-  const sellPriceKesCents = await priceItem(d.sourcePriceUsdCents, "USD", d.markupPct);
+  const sellPriceKesCents = await priceItem(
+    d.sourcePriceUsdCents,
+    "USD",
+    d.markupPct,
+    await hsRatesFor({ categoryId: d.categoryId }),
+  );
 
   // Resolve or create brand
   let brandId: string | undefined;
@@ -87,6 +92,7 @@ r.patch("/products/:id", async (req, res) => {
         parsed.data.sourcePriceUsdCents ?? existing.sourcePriceUsdCents,
         existing.sourceCurrency as SourceCurrency,
         parsed.data.markupPct ?? existing.markupPct,
+        await hsRatesFor({ productId: req.params.id }),
       ),
     };
   }
@@ -111,6 +117,80 @@ r.post("/products/:id/variants", async (req, res) => {
 r.post("/products/reprice-all", async (_req, res) => {
   const updated = await repriceAllProducts();
   return res.json(envelope({ updated }));
+});
+
+// ── HS tax categories ─────────────────────────────────────────────────────────
+// Rates feed item pricing; after editing, run /products/reprice-all (or wait
+// for the daily FX-update reprice) to roll changes into sell prices.
+
+r.get("/hs-tax-categories", async (_req, res) => {
+  const { rows } = await db.query(
+    `SELECT h.*, count(p.id)::int AS products_pinned
+     FROM hs_tax_categories h
+     LEFT JOIN products p ON p.hs_tax_category_id = h.id
+     GROUP BY h.id ORDER BY h.code`,
+  );
+  return res.json(envelope(rows));
+});
+
+r.patch("/hs-tax-categories/:code", async (req, res) => {
+  const { dutyPct, vatPct, excisePct, name, notes } = req.body ?? {};
+  const fields: string[] = [];
+  const values: unknown[] = [req.params.code];
+  const push = (col: string, v: unknown) => {
+    if (v == null) return;
+    if (col.endsWith("_pct") && (typeof v !== "number" || v < 0 || v > 200)) {
+      throw Object.assign(new Error(`${col} must be a number between 0 and 200`), { status: 400 });
+    }
+    values.push(v);
+    fields.push(`${col} = $${values.length}`);
+  };
+  try {
+    push("duty_pct", dutyPct);
+    push("vat_pct", vatPct);
+    push("excise_pct", excisePct);
+    push("name", name);
+    push("notes", notes);
+  } catch (err) {
+    return res.status(400).json(errorEnvelope("validation", (err as Error).message));
+  }
+  if (!fields.length) return res.status(400).json(errorEnvelope("validation", "No fields to update"));
+
+  const { rows } = await db.query(
+    `UPDATE hs_tax_categories SET ${fields.join(", ")}, updated_at = now()
+     WHERE code = $1 RETURNING *`,
+    values,
+  );
+  if (!rows[0]) return res.status(404).json(errorEnvelope("not_found", "HS tax category not found"));
+  return res.json(envelope(rows[0]));
+});
+
+// Pin a product to a specific HS tax category (or null to track its store
+// category's default) and reprice it immediately.
+r.put("/products/:id/hs-tax-category", async (req, res) => {
+  const { code } = req.body ?? {};
+  let hsId: string | null = null;
+  if (code != null) {
+    const { rows } = await db.query(`SELECT id FROM hs_tax_categories WHERE code = $1`, [code]);
+    if (!rows[0]) return res.status(404).json(errorEnvelope("not_found", "HS tax category not found"));
+    hsId = rows[0].id;
+  }
+
+  const existing = await products.findById(req.params.id);
+  if (!existing) return res.status(404).json(errorEnvelope("not_found", "Product not found"));
+
+  await db.query(`UPDATE products SET hs_tax_category_id = $2, updated_at = now() WHERE id = $1`, [
+    req.params.id,
+    hsId,
+  ]);
+  const sellPriceKesCents = await priceItem(
+    existing.sourcePriceUsdCents,
+    existing.sourceCurrency as SourceCurrency,
+    existing.markupPct,
+    await hsRatesFor({ productId: req.params.id }),
+  );
+  const updated = await products.update(req.params.id, { sellPriceKesCents });
+  return res.json(envelope(updated));
 });
 
 // ── Orders ────────────────────────────────────────────────────────────────────
