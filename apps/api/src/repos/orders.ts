@@ -266,11 +266,14 @@ export async function updateStatus(
   return rows[0] ? mapOrder(rows[0]) : null;
 }
 
+export type AdminOrder = Order & { customerName: string | null; customerEmail: string | null };
+
 export async function listAll(opts: {
   status?: OrderStatus;
+  userId?: string;
   page?: number;
   limit?: number;
-}): Promise<{ orders: Order[]; total: number }> {
+}): Promise<{ orders: AdminOrder[]; total: number }> {
   const { page = 1, limit = 25 } = opts;
   const offset = (page - 1) * limit;
   const conditions: string[] = [];
@@ -279,19 +282,32 @@ export async function listAll(opts: {
 
   if (opts.status) {
     params.push(opts.status);
-    conditions.push(`status = $${pi++}`);
+    conditions.push(`o.status = $${pi++}`);
+  }
+  if (opts.userId) {
+    params.push(opts.userId);
+    conditions.push(`o.user_id = $${pi++}`);
   }
 
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   params.push(limit, offset);
 
   const { rows } = await db.query(
-    `SELECT * FROM orders ${where} ORDER BY created_at DESC LIMIT $${pi++} OFFSET $${pi++}`,
+    `SELECT o.*, u.full_name AS customer_name, u.email AS customer_email
+     FROM orders o LEFT JOIN users u ON u.id = o.user_id
+     ${where} ORDER BY o.created_at DESC LIMIT $${pi++} OFFSET $${pi++}`,
     params,
   );
   const { rows: countRows } = await db.query(
-    `SELECT count(*)::int AS total FROM orders ${where}`,
+    `SELECT count(*)::int AS total FROM orders o ${where}`,
     params.slice(0, -2),
   );
-  return { orders: rows.map(mapOrder), total: countRows[0].total };
+  return {
+    orders: rows.map((row) => ({
+      ...mapOrder(row),
+      customerName: (row.customer_name as string | null) ?? null,
+      customerEmail: (row.customer_email as string | null) ?? null,
+    })),
+    total: countRows[0].total,
+  };
 }

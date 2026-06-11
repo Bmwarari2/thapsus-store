@@ -6,6 +6,11 @@ import { useAuthStore } from '../../stores/authStore';
 import { ImportsPage } from './ImportsPage';
 import { ProductsPage } from './ProductsPage';
 import { PurchasingPage } from './PurchasingPage';
+import { DashboardPage } from './DashboardPage';
+import { OrdersPage } from './OrdersPage';
+import { ReviewsPage } from './ReviewsPage';
+import { CustomersPage } from './CustomersPage';
+import { PricingConfigPage } from './PricingConfigPage';
 
 const menu = [
   { label: 'Dashboard',     path: '/admin',            icon: LayoutDashboard },
@@ -44,13 +49,6 @@ const NavLinks = ({ onNavigate }: { onNavigate?: () => void }) => {
     </nav>
   );
 };
-
-const Dashboard = () => (
-  <div className="p-6 md:p-8">
-    <h1 className="text-2xl font-bold mb-2">Dashboard</h1>
-    <p className="text-textSecondary text-sm">Analytics will appear here once orders start flowing.</p>
-  </div>
-);
 
 const Placeholder = ({ title }: { title: string }) => (
   <div className="p-6 md:p-8">
@@ -137,13 +135,14 @@ export const AdminLayout = () => {
       {/* Main content */}
       <main className="flex-1 overflow-x-hidden pt-14 md:pt-0">
         <Routes>
-          <Route index element={<Dashboard />} />
+          <Route index element={<DashboardPage />} />
           <Route path="purchasing" element={<PurchasingPage />} />
           <Route path="products"  element={<ProductsPage />} />
-          <Route path="orders"    element={<Placeholder title="Orders Management" />} />
-          <Route path="reviews"   element={<Placeholder title="Reviews Moderation" />} />
-          <Route path="customers" element={<Placeholder title="Customers" />} />
+          <Route path="orders"    element={<OrdersPage />} />
+          <Route path="reviews"   element={<ReviewsPage />} />
+          <Route path="customers" element={<CustomersPage />} />
           <Route path="imports"   element={<ImportsPage />} />
+          <Route path="pricing"   element={<PricingConfigPage />} />
           <Route path="*"         element={<Placeholder title="Coming Soon" />} />
         </Routes>
       </main>

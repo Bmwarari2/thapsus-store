@@ -1,17 +1,64 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import useEmblaCarousel from 'embla-carousel-react';
-import { ChevronRight, Heart, Share2, Star, ShieldCheck, Truck } from 'lucide-react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { ChevronRight, Heart, Share2, Star, ShieldCheck, Truck, Loader2 } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient, useInfiniteQuery } from '@tanstack/react-query';
 import { Button } from '../../components/ui/Button';
 import { Badge } from '../../components/ui/Badge';
 import { PriceDisplay } from '../../components/product/PriceDisplay';
+import { ProductGrid } from '../../components/product/ProductGrid';
 import { SkeletonCard } from '../../components/shared/SkeletonCard';
 import { useCartStore } from '../../stores/cartStore';
 import { useAuthStore } from '../../stores/authStore';
-import { apiGetProduct, apiAddToCart } from '../../lib/api';
+import { useWishlist } from '../../hooks/useWishlist';
+import { useIntersection } from '../../hooks/useIntersection';
+import { apiGetProduct, apiAddToCart, apiGetRelatedProducts, type FeedPage, type Product } from '../../lib/api';
 import { imageAtWidth } from '../../lib/utils';
 import toast from 'react-hot-toast';
+
+/** "You may also like" — an endless recommendation feed under the product. */
+const RelatedProducts = ({ slug }: { slug: string }) => {
+  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = useInfiniteQuery<FeedPage>({
+    queryKey: ['related', slug],
+    queryFn: ({ pageParam }) => apiGetRelatedProducts(slug, pageParam as string | undefined),
+    initialPageParam: undefined,
+    getNextPageParam: (last) => last.nextCursor ?? undefined,
+    staleTime: 5 * 60_000,
+  });
+
+  const products = useMemo(() => {
+    const seen = new Set<string>();
+    const out: Product[] = [];
+    for (const page of data?.pages ?? []) {
+      for (const p of page.items) {
+        if (!seen.has(p.id)) { seen.add(p.id); out.push(p); }
+      }
+    }
+    return out;
+  }, [data]);
+
+  const sentinelRef = useIntersection(() => {
+    if (hasNextPage && !isFetchingNextPage) fetchNextPage();
+  });
+
+  if (!isLoading && products.length === 0) return null;
+
+  return (
+    <div className="mt-16">
+      <h2 className="text-xl md:text-2xl font-black mb-6">You may also like</h2>
+      {isLoading ? (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} />)}
+        </div>
+      ) : (
+        <ProductGrid products={products} />
+      )}
+      <div ref={sentinelRef} className="h-10 flex items-center justify-center mt-4">
+        {isFetchingNextPage && <Loader2 size={20} className="animate-spin text-textSecondary" />}
+      </div>
+    </div>
+  );
+};
 
 export const ProductDetailPage = () => {
   const { slug } = useParams<{ slug: string }>();
@@ -19,12 +66,12 @@ export const ProductDetailPage = () => {
   const token = useAuthStore(state => state.token);
   const setItemCount = useCartStore(state => state.setItemCount);
   const itemCount = useCartStore(state => state.itemCount);
+  const { isWishlisted: inWishlist, toggle: toggleWishlist } = useWishlist();
 
   const [emblaRef, emblaApi] = useEmblaCarousel({ loop: true });
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [selectedColor, setSelectedColor] = useState<string | null>(null);
   const [selectedSize, setSelectedSize] = useState<string | null>(null);
-  const [isWishlisted, setIsWishlisted] = useState(false);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['product', slug],
@@ -179,10 +226,10 @@ export const ProductDetailPage = () => {
             </h1>
             <div className="flex gap-2">
               <button
-                onClick={() => setIsWishlisted(!isWishlisted)}
+                onClick={() => toggleWishlist(product.id)}
                 className="p-3 bg-surface rounded-full hover:bg-gray-200 transition-colors"
               >
-                <Heart size={20} className={isWishlisted ? 'fill-primary text-primary' : 'text-textSecondary'} />
+                <Heart size={20} className={inWishlist(product.id) ? 'fill-primary text-primary' : 'text-textSecondary'} />
               </button>
               <button className="hidden sm:block p-3 bg-surface rounded-full hover:bg-gray-200 transition-colors">
                 <Share2 size={20} className="text-textSecondary" />
@@ -320,6 +367,8 @@ export const ProductDetailPage = () => {
           )}
         </div>
       </div>
+
+      {slug && <RelatedProducts slug={slug} />}
     </div>
   );
 };

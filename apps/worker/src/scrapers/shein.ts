@@ -156,16 +156,39 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
   const onSale = detail.is_on_sale !== "0";
 
   // The default colour (selected SKC) ships a full gallery in `skcImages`; other
-  // colours only carry a single representative image. Build the product gallery
-  // from every colour's image plus the default colour's extra shots, deduped.
+  // colours only carry a single representative image. Some pages instead (or
+  // additionally) ship the gallery as `detail_image` / `goods_imgs` entries —
+  // collect those too, since pages missing skcImages were importing with a
+  // single photo. Deduped, colour swatches first.
   const colourImage = (c: Node): string => httpsify(c.goods_image);
   const skcImgNode = deepFind(gb, (n) => Array.isArray(n.skcImages) && (n.skcImages as unknown[]).length > 0);
   const skcImages = skcImgNode ? (skcImgNode.skcImages as unknown[]).map(httpsify).filter(Boolean) : [];
+  const galleryImages: string[] = [];
+  for (const key of ["detail_image", "goods_imgs", "gallery"]) {
+    const node = deepFind(gb, (n) => Array.isArray(n[key]) && (n[key] as unknown[]).length > 0);
+    for (const entry of (node?.[key] as unknown[]) ?? []) {
+      const url = isObj(entry)
+        ? httpsify(entry.origin_image ?? entry.medium_image ?? entry.image_url)
+        : httpsify(entry);
+      if (url) galleryImages.push(url);
+    }
+  }
   const images = [...new Set([
     ...colours.map(colourImage),
     ...skcImages,
+    ...galleryImages,
     httpsify(detail.goods_img),
   ].filter(Boolean))];
+
+  // Source star rating: SHEIN exposes comment_rank_average (0–5) + comment_num.
+  const commentNode = deepFind(gb, (n) =>
+    ("comment_rank_average" in n || "comments_overview" in n) && ("comment_num" in n || "comments_overview" in n));
+  const overview = isObj(commentNode?.comments_overview) ? (commentNode!.comments_overview as Node) : commentNode;
+  const ratingRaw = parseFloat(String(overview?.comment_rank_average ?? overview?.comment_rank ?? ""));
+  const reviewCountRaw = parseInt(String(overview?.comment_num ?? "").replace(/[^\d]/g, ""), 10);
+  const rating = Number.isFinite(ratingRaw) && ratingRaw > 0 && ratingRaw <= 5
+    ? Math.round(ratingRaw * 10) / 10 : undefined;
+  const reviewCount = Number.isFinite(reviewCountRaw) && reviewCountRaw >= 0 ? reviewCountRaw : undefined;
 
   // Variants: colour × size. Real per-size stock when the size-id resolves,
   // otherwise the product-level stock as a best effort. Each variant points at
@@ -212,6 +235,8 @@ function buildFromGbRawData($: CheerioAPI, gb: Node, sourceUrl: string): Scraped
     variants,
     stockStatus,
     tags: [],
+    rating,
+    reviewCount,
   };
 }
 
@@ -333,6 +358,26 @@ export function parseSheinSearchHtml(html: string): Partial<ScrapedProduct>[] {
   if (!list.length) {
     const extracted = extractJsonAssignment(html, /"goods_list"\s*:/);
     if (Array.isArray(extracted)) list = extracted as SheinSearchItem[];
+  }
+
+  // Last resort: rendered DOM. Search pages increasingly hydrate the grid
+  // client-side with no embedded goods_list, but product links are plain
+  // anchors (…/Slug-p-123456.html). The id+URL is all the import pipeline
+  // needs — it fetches each product page for full details anyway.
+  if (!list.length) {
+    const $ = cheerio.load(html);
+    const seen = new Set<string>();
+    $('a[href*="-p-"]').each((_, el) => {
+      const href = $(el).attr("href") ?? "";
+      const m = href.match(/\/([^/]+)-p-(\d+)(?:-cat-\d+)?\.html/);
+      if (!m || seen.has(m[2])) return;
+      seen.add(m[2]);
+      const name = ($(el).attr("title") || $(el).attr("aria-label") || $(el).find("img").attr("alt") || m[1].replace(/-/g, " ")).trim();
+      const img = $(el).find("img").attr("data-src") ?? $(el).find("img").attr("src") ?? "";
+      list.push({ goods_id: m[2], goods_name: name, goods_url_name: m[1], goods_img: img });
+    });
+    if (list.length) console.log(`[shein] search parsed via DOM fallback — ${list.length} product links`);
+    else console.warn(`[shein] search page yielded no products (html ${html.length} bytes, title ${JSON.stringify($("title").text().slice(0, 60))})`);
   }
 
   const results: Partial<ScrapedProduct>[] = [];

@@ -176,6 +176,33 @@ export interface FeedPage {
 export const apiGetFeed = (params: Record<string, string | number | undefined>) =>
   api.get('/products/feed', { params }).then(unwrap<FeedPage>);
 
+export const apiGetRelatedProducts = (slug: string, cursor?: string) =>
+  api.get(`/products/${slug}/related`, { params: { cursor, limit: 12 } }).then(unwrap<FeedPage>);
+
+// ── Wishlist ──────────────────────────────────────────────────────────────────
+
+export interface WishlistItem {
+  id: string;
+  created_at: string;
+  product_id: string;
+  name: string;
+  slug: string;
+  image: string | null;
+  sell_price_kes_cents: number;
+  rating: number | null;
+  review_count: number;
+  stock_status: string;
+}
+
+export const apiGetWishlist = () =>
+  api.get('/customer/wishlist').then(unwrap<WishlistItem[]>);
+
+export const apiAddToWishlist = (productId: string) =>
+  api.post('/customer/wishlist', { productId }).then(unwrap<{ added: boolean }>);
+
+export const apiRemoveFromWishlist = (productId: string) =>
+  api.delete(`/customer/wishlist/${productId}`).then(unwrap<{ removed: boolean }>);
+
 export const apiGetProduct = (slug: string) =>
   api.get(`/products/${slug}`).then(unwrap<{
     product: Product;
@@ -236,6 +263,9 @@ export const apiCreateOrder = (body: {
 
 export const apiGetOrder = (id: string) =>
   api.get(`/orders/${id}`).then(unwrap<{ order: Order; items: OrderItem[] }>);
+
+export const apiGetMyOrders = (page = 1) =>
+  api.get('/orders', { params: { page } }).then(unwrap<{ orders: Order[]; total: number }>);
 
 export const apiInitiateMpesa = (orderId: string, phone: string) =>
   api.post('/payments/mpesa/initiate', { orderId, phone })
@@ -336,6 +366,130 @@ export const apiAdminUpdateProduct = (id: string, body: AdminProductUpdate) =>
 
 export const apiAdminRepriceAll = () =>
   api.post('/admin/products/reprice-all').then(unwrap<{ updated: number }>);
+
+// Hard delete when never ordered; otherwise the API deactivates instead.
+export const apiAdminDeleteProduct = (id: string) =>
+  api.delete(`/admin/products/${id}`, { params: { hard: 'true' } })
+    .then(unwrap<{ deleted: boolean; deactivated?: boolean }>);
+
+// ── Admin: Orders ─────────────────────────────────────────────────────────────
+
+export interface AdminOrder {
+  id: string;
+  orderNumber: string;
+  userId: string;
+  customerName: string | null;
+  customerEmail: string | null;
+  status: string;
+  totalCents: number;
+  paidAt: string | null;
+  trackingNumber: string | null;
+  createdAt: string;
+  deliveryAddressSnap: Record<string, unknown> | null;
+}
+
+export interface AdminOrderItem {
+  id: string;
+  productId: string;
+  productNameSnap: string;
+  productImageSnap: string | null;
+  variantAttrsSnap: Record<string, string> | null;
+  qty: number;
+  unitPriceCents: number;
+  totalCents: number;
+}
+
+export const apiAdminGetOrders = (params: { status?: string; user?: string; page?: number }) =>
+  api.get('/admin/orders', { params }).then(unwrap<{ orders: AdminOrder[]; total: number }>);
+
+export const apiAdminGetOrder = (id: string) =>
+  api.get(`/admin/orders/${id}`).then(unwrap<{
+    order: AdminOrder;
+    items: AdminOrderItem[];
+    customer: { full_name: string | null; email: string; phone: string | null } | null;
+  }>);
+
+export const apiAdminUpdateOrderStatus = (id: string, body: { status: string; trackingNumber?: string; note?: string }) =>
+  api.patch(`/admin/orders/${id}/status`, body).then(unwrap<AdminOrder>);
+
+// ── Admin: Customers ──────────────────────────────────────────────────────────
+
+export interface AdminCustomer {
+  id: string;
+  full_name: string | null;
+  email: string;
+  phone: string | null;
+  created_at: string;
+  is_active: boolean;
+  order_count: number;
+  total_spent_cents: number;
+  last_order_at: string | null;
+}
+
+export const apiAdminGetCustomers = (params: { q?: string; page?: number }) =>
+  api.get('/admin/customers', { params }).then(unwrap<{ customers: AdminCustomer[]; total: number }>);
+
+// ── Admin: Reviews ────────────────────────────────────────────────────────────
+
+export interface AdminReview {
+  id: string;
+  productId: string;
+  userId: string;
+  rating: number;
+  title: string | null;
+  body: string | null;
+  images: string[];
+  status: string;
+  createdAt: string;
+}
+
+export const apiAdminGetReviews = (page = 1) =>
+  api.get('/admin/reviews', { params: { page } }).then(unwrap<{ reviews: AdminReview[]; total: number }>);
+
+export const apiAdminModerateReview = (id: string, status: 'approved' | 'rejected') =>
+  api.patch(`/admin/reviews/${id}`, { status }).then(unwrap<AdminReview>);
+
+// ── Admin: Analytics / Pricing config ─────────────────────────────────────────
+
+export interface AdminAnalytics {
+  revenue: { today: string | null; week: string | null; month: string | null; all_time: string | null };
+  orderCounts: Record<string, number>;
+  topProducts: Array<{ id: string; name: string; slug: string; image: string | null; units_sold: number; revenue_cents: string }>;
+  recentOrders: Array<{ id: string; order_number: string; status: string; total_cents: string; created_at: string; customer_name: string | null }>;
+}
+
+export const apiAdminGetAnalytics = () =>
+  api.get('/admin/analytics').then(unwrap<AdminAnalytics>);
+
+export interface PricingConfigRow {
+  key: string;
+  value: string;
+  label: string | null;
+  updated_at: string;
+}
+
+export const apiAdminGetPricingConfig = () =>
+  api.get('/admin/pricing-config').then(unwrap<PricingConfigRow[]>);
+
+export const apiAdminUpdatePricingConfig = (updates: Record<string, string>) =>
+  api.patch('/admin/pricing-config', updates).then(unwrap<{ updated: number }>);
+
+export interface HsTaxCategory {
+  id: string;
+  code: string;
+  name: string;
+  duty_pct: string;
+  vat_pct: string;
+  excise_pct: string;
+  notes: string | null;
+  products_pinned: number;
+}
+
+export const apiAdminGetHsTaxCategories = () =>
+  api.get('/admin/hs-tax-categories').then(unwrap<HsTaxCategory[]>);
+
+export const apiAdminUpdateHsTaxCategory = (code: string, body: { dutyPct?: number; vatPct?: number; excisePct?: number }) =>
+  api.patch(`/admin/hs-tax-categories/${encodeURIComponent(code)}`, body).then(unwrap<HsTaxCategory>);
 
 // ── Admin: Import Jobs ────────────────────────────────────────────────────────
 

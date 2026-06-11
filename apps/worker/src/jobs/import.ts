@@ -352,9 +352,12 @@ async function upsertProduct(
        sell_price_kes_cents, compare_at_kes_cents,
        weight_grams, weight_source,
        estimated_days_min, estimated_days_max, stock_status,
+       source_rating, source_review_count,
        last_scraped_at
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,now())
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$26,$27,now())
      ON CONFLICT (source_platform, source_id) DO UPDATE SET
+       source_rating          = COALESCE(EXCLUDED.source_rating, products.source_rating),
+       source_review_count    = COALESCE(EXCLUDED.source_review_count, products.source_review_count),
        source_price_usd_cents = EXCLUDED.source_price_usd_cents,
        source_currency        = EXCLUDED.source_currency,
        source_url             = EXCLUDED.source_url,
@@ -402,6 +405,8 @@ async function upsertProduct(
       config.fxBufferPct,
       taxInclusiveFactor(config, hsRates),
       config.priceRoundToKes,
+      scraped.rating ?? null,
+      scraped.reviewCount ?? null,
     ],
   );
 
