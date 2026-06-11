@@ -15,8 +15,8 @@
  */
 
 import type { Job } from "bullmq";
-import type { ScrapedProduct, ScrapedVariant } from "@thapsus/shared";
-import { uniqueSlug, computeItemPriceKesCents, parsePricingConfigV2 } from "@thapsus/shared";
+import type { HsTaxRates, ScrapedProduct, ScrapedVariant } from "@thapsus/shared";
+import { uniqueSlug, computeItemPriceKesCents, parsePricingConfigV2, taxInclusiveFactor } from "@thapsus/shared";
 import { db } from "../db.js";
 import { uploadProductImagesAligned } from "../images.js";
 import {
@@ -48,6 +48,29 @@ async function loadPricingConfig(): Promise<PricingConfig> {
   return parsePricingConfigV2(rows);
 }
 
+/**
+ * HS tax rates for a store category's default HS tax category. NULL → the
+ * engine falls back to the flat pricing_config duty/VAT. Per-product HS
+ * overrides set by admins are honoured by the set-based reprice (daily after
+ * FX update, or "Reprice all"), not here — imports key off the category.
+ */
+async function loadHsRatesForCategory(categoryId: string | null): Promise<HsTaxRates | null> {
+  if (!categoryId) return null;
+  const { rows } = await db.query(
+    `SELECT h.duty_pct, h.vat_pct, h.excise_pct
+     FROM categories c
+     JOIN hs_tax_categories h ON h.id = c.default_hs_tax_category_id
+     WHERE c.id = $1`,
+    [categoryId],
+  );
+  if (!rows[0]) return null;
+  return {
+    dutyPct: Number(rows[0].duty_pct),
+    vatPct: Number(rows[0].vat_pct),
+    excisePct: Number(rows[0].excise_pct),
+  };
+}
+
 /** Deterministic variant identity — must match the API's canonicalVariantKey. */
 function canonicalVariantKey(attributes: Record<string, string>): string {
   const sorted = Object.keys(attributes).sort().map((k) => [k, attributes[k]]);
@@ -64,6 +87,7 @@ async function syncVariants(
   basePriceKesCents: number,
   config: PricingConfig,
   markupPct: number,
+  hsRates: HsTaxRates | null,
   imageMap: Map<string, string>,
 ): Promise<void> {
   const seenKeys: string[] = [];
@@ -75,7 +99,7 @@ async function syncVariants(
     seenKeys.push(key);
 
     const variantPrice = v.priceUsdCents != null
-      ? computeItemPriceKesCents(v.priceUsdCents, scraped.sourceCurrency ?? "USD", config, markupPct)
+      ? computeItemPriceKesCents(v.priceUsdCents, scraped.sourceCurrency ?? "USD", config, markupPct, hsRates)
       : basePriceKesCents;
 
     // Point the variant at the R2 copy of its colour image (so it matches the gallery).
@@ -295,9 +319,10 @@ async function upsertProduct(
 ): Promise<{ id: string; isNew: boolean }> {
   const currency = scraped.sourceCurrency ?? "USD";
   const { weightGrams, weightSource } = await resolveWeight(scraped, categoryId);
+  const hsRates = await loadHsRatesForCategory(categoryId);
 
   const compareAtKes = scraped.compareAtCents
-    ? computeItemPriceKesCents(scraped.compareAtCents, currency, config)
+    ? computeItemPriceKesCents(scraped.compareAtCents, currency, config, undefined, hsRates)
     : null;
 
   // Resolve or create brand
@@ -317,7 +342,7 @@ async function upsertProduct(
   // markup_pct, manual weight) are preserved. sell_price respects the row's
   // own markup, recomputed in SQL with the same formula as the engine.
   const slug = uniqueSlug(scraped.name);
-  const defaultPrice = computeItemPriceKesCents(scraped.sourcePriceUsdCents, currency, config);
+  const defaultPrice = computeItemPriceKesCents(scraped.sourcePriceUsdCents, currency, config, undefined, hsRates);
 
   const { rows: [row] } = await db.query(
     `INSERT INTO products (
@@ -375,9 +400,7 @@ async function upsertProduct(
       config.gbpToKesRate,
       config.usdToKesRate,
       config.fxBufferPct,
-      config.taxInclusivePricing
-        ? (1 + config.importDutyPct / 100) * (1 + config.vatPct / 100)
-        : 1,
+      taxInclusiveFactor(config, hsRates),
       config.priceRoundToKes,
     ],
   );
@@ -407,7 +430,7 @@ async function upsertProduct(
   if (!gallery.length && scraped.images.length) gallery = scraped.images; // every upload failed — stay usable
   await db.query(`UPDATE products SET images = $2 WHERE id = $1`, [productId, gallery]);
 
-  await syncVariants(productId, scraped, basePrice, config, rowMarkup, imageMap);
+  await syncVariants(productId, scraped, basePrice, config, rowMarkup, hsRates, imageMap);
 
   return { id: productId, isNew };
 }

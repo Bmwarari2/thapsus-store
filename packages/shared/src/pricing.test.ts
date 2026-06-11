@@ -14,21 +14,58 @@ const baseCfg: PricingConfigV2 = {
   markupPct: 20,
   importDutyPct: 25,
   vatPct: 16,
+  idfPct: 2.5,
+  rdlPct: 1.5,
   priceRoundToKes: 10,
   taxInclusivePricing: true,
 };
 
+// Flat fallback tax factor: 1.25 × 1.16 + (2.5 + 1.5)/100 = 1.49
 describe("computeItemPriceKesCents", () => {
-  it("prices a GBP item with buffer, markup, duty and VAT folded in", () => {
-    // £10.00 → 1000 × 165 × 1.02 × 1.20 × 1.25 × 1.16 = 292,842 KES cents
-    // → rounded up to nearest KES 10 = 293,000 cents (KES 2,930)
-    expect(computeItemPriceKesCents(1000, "GBP", baseCfg)).toBe(293000);
+  it("prices a GBP item with buffer, markup, duty, VAT and levies folded in", () => {
+    // £10.00 → 1000 × 165 × 1.02 × 1.20 = 201,960 × 1.49 = 300,920.4 KES cents
+    // → rounded up to nearest KES 10 = 301,000 cents (KES 3,010)
+    expect(computeItemPriceKesCents(1000, "GBP", baseCfg)).toBe(301000);
   });
 
   it("prices a USD item with the USD rate", () => {
-    // $10.00 → 1000 × 130 × 1.02 × 1.20 × 1.25 × 1.16 = 230,724
-    // → rounded up to nearest KES 10 = 231,000
-    expect(computeItemPriceKesCents(1000, "USD", baseCfg)).toBe(231000);
+    // $10.00 → 1000 × 130 × 1.02 × 1.20 = 159,120 × 1.49 = 237,088.8
+    // → rounded up to nearest KES 10 = 238,000
+    expect(computeItemPriceKesCents(1000, "USD", baseCfg)).toBe(238000);
+  });
+
+  it("applies the item's HS category rates instead of the flat fallback", () => {
+    // Supplements band: 1.10 × 1.16 + 0.04 = 1.316 → 159,120 × 1.316 = 209,401.92
+    const supplements = computeItemPriceKesCents(1000, "USD", baseCfg, undefined, {
+      dutyPct: 10, vatPct: 16, excisePct: 0,
+    });
+    expect(supplements).toBe(210000);
+
+    // Apparel band: 1.35 × 1.16 + 0.04 = 1.606 → 159,120 × 1.606 = 255,546.72
+    const apparel = computeItemPriceKesCents(1000, "USD", baseCfg, undefined, {
+      dutyPct: 35, vatPct: 16, excisePct: 0,
+    });
+    expect(apparel).toBe(256000);
+
+    expect(supplements).toBeLessThan(apparel);
+  });
+
+  it("compounds excise between duty and VAT (cosmetics-style band)", () => {
+    // 1.25 × 1.15 × 1.16 + 0.04 = 1.7075 → 159,120 × 1.7075 = 271,697.4 → 272,000
+    expect(
+      computeItemPriceKesCents(1000, "USD", baseCfg, undefined, {
+        dutyPct: 25, vatPct: 16, excisePct: 15,
+      }),
+    ).toBe(272000);
+  });
+
+  it("duty/VAT-free items still carry the IDF + RDL levies", () => {
+    // 1.0 + 0.04 = 1.04 → 159,120 × 1.04 = 165,484.8 → 166,000
+    expect(
+      computeItemPriceKesCents(1000, "USD", baseCfg, undefined, {
+        dutyPct: 0, vatPct: 0, excisePct: 0,
+      }),
+    ).toBe(166000);
   });
 
   it("contains no weight or freight component", () => {
@@ -43,7 +80,7 @@ describe("computeItemPriceKesCents", () => {
     expect(five).toBeLessThan(twenty);
   });
 
-  it("omits duty/VAT when tax-inclusive pricing is off", () => {
+  it("omits taxes when tax-inclusive pricing is off", () => {
     const cfg = { ...baseCfg, taxInclusivePricing: false };
     // 1000 × 130 × 1.02 × 1.20 = 159,120 → rounded up to nearest KES 10 = 160,000
     expect(computeItemPriceKesCents(1000, "USD", cfg)).toBe(160000);
@@ -106,6 +143,12 @@ describe("parsePricingConfigV2", () => {
     expect(cfg.gbpToKesRate).toBe(165);
     expect(cfg.taxInclusivePricing).toBe(true);
     expect(cfg.fxBufferPct).toBe(2);
+    expect(cfg.idfPct).toBe(2.5);
+    expect(cfg.rdlPct).toBe(1.5);
+  });
+
+  it("defaults the markup to the intended 10%", () => {
+    expect(parsePricingConfigV2([]).markupPct).toBe(10);
   });
 
   it("turns tax-inclusive pricing off only on an explicit 'false'", () => {
