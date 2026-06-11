@@ -89,7 +89,9 @@ export const CreateProductSchema = z.object({
   sourceUrl: z.string().url().optional(),
 });
 
-export const UpdateProductSchema = CreateProductSchema.partial();
+export const UpdateProductSchema = CreateProductSchema.partial().extend({
+  isActive: z.boolean().optional(), // deactivate/reactivate from the admin table
+});
 
 // ── Admin: Import Job ─────────────────────────────────────────────────────────
 // Alibaba is dropped from the customer-facing pipeline (B2B/MOQ pricing would

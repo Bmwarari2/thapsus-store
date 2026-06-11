@@ -21,6 +21,7 @@ r.get("/products", async (req, res) => {
   const result = await products.list({
     categorySlug: category,
     search: q,
+    includeInactive: active === "all",
     page: Number(page ?? 1),
     limit: Math.min(Number(limit ?? 25), 100),
   });
