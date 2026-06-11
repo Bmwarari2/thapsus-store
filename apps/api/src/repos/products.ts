@@ -150,6 +150,7 @@ export interface ListProductsOptions {
   sort?: "newest" | "popular" | "price_asc" | "price_desc" | "rating";
   page?: number;
   limit?: number;
+  includeInactive?: boolean; // admin tables only — deactivated rows stay editable
 }
 
 /** Offset pagination — admin tables only. The customer feed uses feed(). */
@@ -157,7 +158,7 @@ export async function list(opts: ListProductsOptions = {}): Promise<{ products: 
   const { page = 1, limit = 24, sort = "newest" } = opts;
   const offset = (page - 1) * limit;
 
-  const conditions: string[] = ["p.is_active = true"];
+  const conditions: string[] = [opts.includeInactive ? "true" : "p.is_active = true"];
   const params: unknown[] = [];
   let pi = 1;
 

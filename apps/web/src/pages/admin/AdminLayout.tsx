@@ -4,6 +4,7 @@ import { LayoutDashboard, ShoppingBag, ShoppingCart, Users, Settings, Package, M
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuthStore } from '../../stores/authStore';
 import { ImportsPage } from './ImportsPage';
+import { ProductsPage } from './ProductsPage';
 import { PurchasingPage } from './PurchasingPage';
 
 const menu = [
@@ -138,7 +139,7 @@ export const AdminLayout = () => {
         <Routes>
           <Route index element={<Dashboard />} />
           <Route path="purchasing" element={<PurchasingPage />} />
-          <Route path="products"  element={<Placeholder title="Products Management" />} />
+          <Route path="products"  element={<ProductsPage />} />
           <Route path="orders"    element={<Placeholder title="Orders Management" />} />
           <Route path="reviews"   element={<Placeholder title="Reviews Moderation" />} />
           <Route path="customers" element={<Placeholder title="Customers" />} />

@@ -278,6 +278,65 @@ export const apiMarkPurchased = (itemId: string, purchased: boolean) =>
   api.patch(`/admin/purchasing/items/${itemId}`, { purchased })
     .then(unwrap<{ itemId: string; purchased: boolean; orderAdvanced: boolean }>);
 
+// ── Admin: Products ───────────────────────────────────────────────────────────
+
+// Mirrors the API's full (admin-only) Product shape — includes cost basis and
+// source fields that PublicProduct deliberately hides.
+export interface AdminProduct {
+  id: string;
+  sourcePlatform: string | null;
+  sourceUrl: string | null;
+  name: string;
+  slug: string;
+  description: string | null;
+  categoryId: string;
+  images: string[];
+  sourcePriceUsdCents: number;
+  sourceCurrency: string;
+  markupPct: number;
+  sellPriceKesCents: number;
+  compareAtKesCents: number | null;
+  weightGrams: number;
+  hasVariants: boolean;
+  stockStatus: string;
+  isActive: boolean;
+  isFeatured: boolean;
+  estimatedDaysMin: number;
+  estimatedDaysMax: number;
+  lastScrapedAt: string | null;
+  createdAt: string;
+}
+
+export const apiAdminGetProducts = (params: {
+  page?: number;
+  limit?: number;
+  q?: string;
+  category?: string;
+  active?: 'all';
+}) =>
+  api.get('/admin/products', { params })
+    .then(unwrap<{ products: AdminProduct[]; total: number }>);
+
+export interface AdminProductUpdate {
+  name?: string;
+  description?: string;
+  categoryId?: string;
+  sourcePriceUsdCents?: number;
+  markupPct?: number;
+  weightGrams?: number;
+  estimatedDaysMin?: number;
+  estimatedDaysMax?: number;
+  isActive?: boolean;
+}
+
+// Changing sourcePriceUsdCents or markupPct recomputes the sell price
+// server-side under the live pricing config.
+export const apiAdminUpdateProduct = (id: string, body: AdminProductUpdate) =>
+  api.patch(`/admin/products/${id}`, body).then(unwrap<AdminProduct>);
+
+export const apiAdminRepriceAll = () =>
+  api.post('/admin/products/reprice-all').then(unwrap<{ updated: number }>);
+
 // ── Admin: Import Jobs ────────────────────────────────────────────────────────
 
 export interface ImportJob {
