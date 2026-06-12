@@ -132,20 +132,32 @@ export async function fetchAliExpressSearch(query: string): Promise<unknown[]> {
     );
   }
 
-  // Fallback: render the search page and lift /item/<id>.html links. The ids
+  // Fallback: render the search page and lift product ids out of it. The ids
   // are all the import pipeline needs — it fetches each product page (which
-  // parses fine) for the real details.
+  // parses fine) for the real details. Search results are mostly embedded as
+  // JSON ("productId": …) with JS-built card links, so match ids anywhere
+  // they appear, not just in /item/<id>.html anchors.
   const slug = query.trim().replace(/\s+/g, "-");
   const searchUrl = `https://www.aliexpress.com/w/wholesale-${encodeURIComponent(slug)}.html`;
   const page = await oxyRequest({ source: "universal", url: searchUrl, render: "html", parse: false });
   const html = String(page.results[0]?.content ?? "");
-  const ids = [...new Set(Array.from(html.matchAll(/\/item\/(\d{10,})\.html/g), (m) => m[1]))];
+  const ids = [...new Set([
+    ...Array.from(html.matchAll(/\/item\/(\d{10,})(?:\.html)?/g), (m) => m[1]),
+    ...Array.from(html.matchAll(/"productId"\s*:\s*"?(\d{10,})"?/gi), (m) => m[1]),
+    ...Array.from(html.matchAll(/[?&]productIds?=(\d{10,})/g), (m) => m[1]),
+  ])];
   if (!ids.length) {
-    console.warn(`[oxylabs] aliexpress search fallback found no item links (html ${html.length} bytes)`);
+    // Identify what AliExpress actually served (punish page, redirect, …).
+    const title = html.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1]?.trim() ?? "";
+    console.warn(
+      `[oxylabs] aliexpress search fallback found no product ids ` +
+        `(html ${html.length} bytes, title ${JSON.stringify(title.slice(0, 80))}, ` +
+        `head: ${JSON.stringify(html.replace(/\s+/g, " ").slice(0, 200))})`,
+    );
     return [];
   }
-  console.log(`[oxylabs] aliexpress search fallback found ${ids.length} item links`);
-  return ids.map((id) => ({
+  console.log(`[oxylabs] aliexpress search fallback found ${ids.length} product ids`);
+  return ids.slice(0, 60).map((id) => ({
     product_id: id,
     product_url: `https://www.aliexpress.com/item/${id}.html`,
     title: `aliexpress-item-${id}`, // placeholder; the product fetch supplies the real name
